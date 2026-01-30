@@ -1,1 +1,7 @@
 cmake-build-debug
+build
+hits.csv.gz
+hits_sample.csv
+hits_scheme_out.csv
+is_same_csv.py
+.venv
