@@ -115,6 +115,68 @@ namespace columnar {
 		}
 	}
 
+	void ColumnarReader::ReadOneColumn(std::size_t batch_idx, std::size_t src_col,
+	                                   DataVector &dst, std::size_t nrows) {
+		const auto &cs = schema_[src_col];
+		const auto &ch = batches_[batch_idx].columns[src_col];
+		utils::Seek(in_, ch.offset);
+
+		auto readFixed = [&]<class T>(std::vector<T> &vec) {
+			vec.resize(nrows);
+			if (nrows > 0) ReadBytes(in_, vec.data(), nrows * sizeof(T));
+		};
+
+		switch (cs.type) {
+			case DataType::Int8:     readFixed(std::get<std::vector<std::int8_t>>(dst)); return;
+			case DataType::Int16:    readFixed(std::get<std::vector<std::int16_t>>(dst)); return;
+			case DataType::Int32:    readFixed(std::get<std::vector<std::int32_t>>(dst)); return;
+			case DataType::Int64:    readFixed(std::get<std::vector<std::int64_t>>(dst)); return;
+			case DataType::UInt8:    readFixed(std::get<std::vector<std::uint8_t>>(dst)); return;
+			case DataType::UInt16:   readFixed(std::get<std::vector<std::uint16_t>>(dst)); return;
+			case DataType::UInt32:   readFixed(std::get<std::vector<std::uint32_t>>(dst)); return;
+			case DataType::UInt64:   readFixed(std::get<std::vector<std::uint64_t>>(dst)); return;
+			case DataType::Float32:  readFixed(std::get<std::vector<float>>(dst)); return;
+			case DataType::Float64:  readFixed(std::get<std::vector<double>>(dst)); return;
+			case DataType::Date:     readFixed(std::get<std::vector<std::int32_t>>(dst)); return;
+			case DataType::DateTime: readFixed(std::get<std::vector<std::int64_t>>(dst)); return;
+			case DataType::String: {
+				auto &vec = std::get<std::vector<std::string>>(dst);
+				vec.resize(nrows);
+				std::vector<std::uint32_t> lens(nrows);
+				if (nrows > 0) ReadBytes(in_, lens.data(), nrows * sizeof(std::uint32_t));
+				for (std::size_t i = 0; i < nrows; ++i) {
+					vec[i].resize(lens[i]);
+					if (lens[i] > 0) ReadBytes(in_, vec[i].data(), lens[i]);
+				}
+				return;
+			}
+		}
+		throw std::runtime_error("columnar: unsupported DataType");
+	}
+
+	Batch ColumnarReader::ReadBatchColumns(std::size_t batch_idx,
+	                                       const std::vector<std::size_t> &col_indices) {
+		if (batch_idx >= batches_.size()) {
+			throw std::runtime_error("columnar: batch index out of range");
+		}
+		Schema sub;
+		sub.reserve(col_indices.size());
+		for (auto c : col_indices) {
+			if (c >= schema_.size()) throw std::runtime_error("columnar: projection column index out of range");
+			sub.push_back(schema_[c]);
+		}
+
+		const std::size_t nrows = batches_[batch_idx].row_count;
+		Batch batch(sub);
+		batch.Reserve(nrows);
+
+		for (std::size_t out_idx = 0; out_idx < col_indices.size(); ++out_idx) {
+			ReadOneColumn(batch_idx, col_indices[out_idx], batch.GetColumn(out_idx), nrows);
+		}
+		batch.SetRowCount(nrows);
+		return batch;
+	}
+
 	Batch ColumnarReader::ReadBatch(std::size_t idx) {
 		const BatchMeta &rg = batches_[idx];
 		const std::size_t ncols = schema_.size();

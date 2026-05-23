@@ -49,3 +49,19 @@ target_link_libraries(type_tests PRIVATE
 )
 
 gtest_discover_tests(type_tests)
+
+add_executable(exec_tests
+        test_exec.cpp
+)
+
+target_link_libraries(exec_tests PRIVATE
+        csv
+        schema
+        batch
+        columnar
+        exec
+        utils
+        GTest::gtest_main
+)
+
+gtest_discover_tests(exec_tests)

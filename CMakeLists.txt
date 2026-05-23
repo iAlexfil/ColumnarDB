@@ -69,6 +69,34 @@ target_link_libraries(columnar PUBLIC
         utils
 )
 
+# --- exec library ---
+
+add_library(exec STATIC
+        src/engine/exec/expr.cpp
+        src/engine/exec/hash_aggregate.cpp
+)
+
+target_include_directories(exec PUBLIC
+        src/engine/exec
+)
+
+target_link_libraries(exec PUBLIC
+        batch
+        columnar
+        schema
+        utils
+)
+
+add_executable(clickbench_run bench/clickbench_run.cpp)
+target_link_libraries(clickbench_run PRIVATE
+        csv
+        schema
+        batch
+        columnar
+        exec
+        utils
+)
+
 add_executable(ColumnarDB main.cpp)
 target_link_libraries(ColumnarDB PRIVATE
         csv

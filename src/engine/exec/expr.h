@@ -1,0 +1,53 @@
+#pragma once
+
+#include <cstdint>
+#include <memory>
+#include <string>
+#include <string_view>
+#include <variant>
+#include <vector>
+
+#include "batch.h"
+#include "schema.h"
+#include "utils/utils.h"
+
+namespace exec {
+
+enum class EvalType : std::uint8_t { I64, U64, F64, Str, Bool, Date, DateTime };
+
+using EvalCol = std::variant<
+	std::vector<std::int64_t>,
+	std::vector<std::uint64_t>,
+	std::vector<double>,
+	std::vector<std::string>,
+	std::vector<std::uint8_t>
+>;
+
+std::size_t EvalColSize(const EvalCol &c);
+
+DataType EvalTypeToDataType(EvalType t);
+EvalType DataTypeToEvalType(DataType t);
+
+struct EvalContext {
+	const Batch *batch = nullptr;
+	const std::vector<std::uint32_t> *sel = nullptr;
+
+	std::size_t rows() const { return sel ? sel->size() : batch->RowCount(); }
+};
+
+class Expr {
+public:
+	virtual ~Expr() = default;
+	virtual EvalType result_type() const = 0;
+	virtual EvalCol eval(const EvalContext &) const = 0;
+};
+
+using ExprPtr = std::unique_ptr<Expr>;
+
+ExprPtr MakeColumn(const Schema &s, std::size_t idx);
+ExprPtr MakeColumnByName(const Schema &s, std::string_view name);
+ExprPtr MakeConstI64(std::int64_t v);
+
+std::size_t ColumnIndexByName(const Schema &s, std::string_view name);
+
+}
