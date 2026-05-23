@@ -32,8 +32,22 @@ std::string ReadString(std::ifstream &in) {
 }
 
 DataType ToDataType(std::uint8_t raw) {
-	if (raw == static_cast<std::uint8_t>(DataType::Int64)) return DataType::Int64;
-	if (raw == static_cast<std::uint8_t>(DataType::String)) return DataType::String;
+	switch (static_cast<DataType>(raw)) {
+		case DataType::Int8:
+		case DataType::Int16:
+		case DataType::Int32:
+		case DataType::Int64:
+		case DataType::UInt8:
+		case DataType::UInt16:
+		case DataType::UInt32:
+		case DataType::UInt64:
+		case DataType::Float32:
+		case DataType::Float64:
+		case DataType::String:
+		case DataType::Date:
+		case DataType::DateTime:
+			return static_cast<DataType>(raw);
+	}
 	throw std::runtime_error("unknown DataType");
 }
 
@@ -114,33 +128,32 @@ namespace columnar {
 			const auto &ch = rg.columns[col];
 			utils::Seek(in_, ch.offset);
 
-			switch (cs.type) {
-				case DataType::Int64: {
-					auto &vec = std::get<std::vector<std::int64_t> >(batch.GetColumn(col));
-					vec.resize(nrows);
-					if (nrows > 0) ReadBytes(in_, vec.data(), nrows * sizeof(std::int64_t));
-					break;
-				}
-				case DataType::String: {
-					auto &vec = std::get<std::vector<std::string> >(batch.GetColumn(col));
-					vec.resize(nrows);
+			auto readFixed = [&]<class T>(std::vector<T> &vec) {
+				vec.resize(nrows);
+				if (nrows > 0) ReadBytes(in_, vec.data(), nrows * sizeof(T));
+			};
 
+			switch (cs.type) {
+				case DataType::Int8:     readFixed(std::get<std::vector<std::int8_t>>(batch.GetColumn(col))); break;
+				case DataType::Int16:    readFixed(std::get<std::vector<std::int16_t>>(batch.GetColumn(col))); break;
+				case DataType::Int32:    readFixed(std::get<std::vector<std::int32_t>>(batch.GetColumn(col))); break;
+				case DataType::Int64:    readFixed(std::get<std::vector<std::int64_t>>(batch.GetColumn(col))); break;
+				case DataType::UInt8:    readFixed(std::get<std::vector<std::uint8_t>>(batch.GetColumn(col))); break;
+				case DataType::UInt16:   readFixed(std::get<std::vector<std::uint16_t>>(batch.GetColumn(col))); break;
+				case DataType::UInt32:   readFixed(std::get<std::vector<std::uint32_t>>(batch.GetColumn(col))); break;
+				case DataType::UInt64:   readFixed(std::get<std::vector<std::uint64_t>>(batch.GetColumn(col))); break;
+				case DataType::Float32:  readFixed(std::get<std::vector<float>>(batch.GetColumn(col))); break;
+				case DataType::Float64:  readFixed(std::get<std::vector<double>>(batch.GetColumn(col))); break;
+				case DataType::Date:     readFixed(std::get<std::vector<std::int32_t>>(batch.GetColumn(col))); break;
+				case DataType::DateTime: readFixed(std::get<std::vector<std::int64_t>>(batch.GetColumn(col))); break;
+				case DataType::String: {
+					auto &vec = std::get<std::vector<std::string>>(batch.GetColumn(col));
+					vec.resize(nrows);
 					std::vector<std::uint32_t> lens(nrows);
 					if (nrows > 0) ReadBytes(in_, lens.data(), nrows * sizeof(std::uint32_t));
-
-					std::uint64_t total = 0;
-					for (auto l: lens) total += l;
-
-					std::string blob;
-					blob.resize(static_cast<std::size_t>(total));
-					if (total > 0) ReadBytes(in_, blob.data(), static_cast<std::size_t>(total));
-
-					std::size_t pos = 0;
 					for (std::size_t i = 0; i < nrows; ++i) {
-						const std::size_t l = lens[i];
-						if (pos + l > blob.size()) throw std::runtime_error("columnar: corrupted string chunk");
-						vec[i] = blob.substr(pos, l);
-						pos += l;
+						vec[i].resize(lens[i]);
+						if (lens[i] > 0) ReadBytes(in_, vec[i].data(), lens[i]);
 					}
 					break;
 				}

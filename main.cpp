@@ -1,4 +1,5 @@
 #include <cstdlib>
+#include <type_traits>
 #include <filesystem>
 #include <fstream>
 #include <iostream>
@@ -8,6 +9,7 @@
 #include "batch.h"
 #include "csvwriter.h"
 #include "schema.h"
+#include "utils/parse.h"
 #include "engine/columnar/columnar_reader.h"
 #include "engine/columnar/columnar_writer.h"
 
@@ -80,17 +82,23 @@ int ToCsv(const std::filesystem::path &in_path,
 			for (std::size_t c = 0; c < cols; ++c) {
 				const auto &cs = schema[c];
 				const auto &col = batch.GetColumn(c);
-				switch (cs.type) {
-					case DataType::Int64: {
-						const auto &vec = std::get<std::vector<std::int64_t> >(col);
-						out_row[c] = std::to_string(vec[r]);
-						break;
-					}
-					case DataType::String: {
-						const auto &vec = std::get<std::vector<std::string> >(col);
-						out_row[c] = vec[r];
-						break;
-					}
+				if (cs.type == DataType::Date) {
+					char buf[10];
+					utils::FormatDate(std::get<std::vector<std::int32_t>>(col)[r], buf);
+					out_row[c] = std::string(buf, 10);
+				} else if (cs.type == DataType::DateTime) {
+					char buf[19];
+					utils::FormatDateTime(std::get<std::vector<std::int64_t>>(col)[r], buf);
+					out_row[c] = std::string(buf, 19);
+				} else {
+					std::visit([&](const auto &vec) {
+						using T = typename std::decay_t<decltype(vec)>::value_type;
+						if constexpr (std::is_same_v<T, std::string>) {
+							out_row[c] = vec[r];
+						} else {
+							out_row[c] = std::to_string(vec[r]);
+						}
+					}, col);
 				}
 			}
 			if (!csv_writer.WriteNext(out_row)) {

@@ -23,17 +23,15 @@ target_include_directories(csv PUBLIC
         src/csv
 )
 
-# --- schema library ---
+# --- schema library (header-only) ---
 
-add_library(schema STATIC
-        src/schema/schema.cpp
-)
+add_library(schema INTERFACE)
 
-target_include_directories(schema PUBLIC
+target_include_directories(schema INTERFACE
         src/schema
 )
 
-target_link_libraries(schema PUBLIC
+target_link_libraries(schema INTERFACE
         csv
         utils
 )

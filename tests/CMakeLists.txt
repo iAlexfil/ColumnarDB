@@ -36,3 +36,16 @@ target_link_libraries(columnar_tests PRIVATE
 )
 
 gtest_discover_tests(columnar_tests)
+
+add_executable(type_tests
+        test_types.cpp
+)
+
+target_link_libraries(type_tests PRIVATE
+        csv
+        schema
+        utils
+        GTest::gtest_main
+)
+
+gtest_discover_tests(type_tests)

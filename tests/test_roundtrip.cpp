@@ -63,22 +63,32 @@ struct FlatTable {
     std::size_t rows = 0;
 };
 
+static DataVector MakeEmptyColumn(DataType t) {
+    switch (t) {
+        case DataType::Int8:     return std::vector<std::int8_t>{};
+        case DataType::Int16:    return std::vector<std::int16_t>{};
+        case DataType::Int32:    return std::vector<std::int32_t>{};
+        case DataType::Int64:    return std::vector<std::int64_t>{};
+        case DataType::UInt8:    return std::vector<std::uint8_t>{};
+        case DataType::UInt16:   return std::vector<std::uint16_t>{};
+        case DataType::UInt32:   return std::vector<std::uint32_t>{};
+        case DataType::UInt64:   return std::vector<std::uint64_t>{};
+        case DataType::Float32:  return std::vector<float>{};
+        case DataType::Float64:  return std::vector<double>{};
+        case DataType::String:   return std::vector<std::string>{};
+        case DataType::Date:     return std::vector<std::int32_t>{};
+        case DataType::DateTime: return std::vector<std::int64_t>{};
+    }
+    throw std::runtime_error("unknown DataType in test");
+}
+
 static FlatTable FlattenBatches(const Schema& schema, const std::vector<Batch>& batches) {
     FlatTable t;
     t.schema = schema;
 
     t.columns.reserve(schema.size());
     for (const auto& c : schema) {
-        switch (c.type) {
-            case DataType::Int64:
-                t.columns.emplace_back(std::vector<std::int64_t>{});
-                break;
-            case DataType::String:
-                t.columns.emplace_back(std::vector<std::string>{});
-                break;
-            default:
-                throw std::runtime_error("Unsupported DataType in test");
-        }
+        t.columns.push_back(MakeEmptyColumn(c.type));
     }
 
     for (const auto& b : batches) {
@@ -86,28 +96,18 @@ static FlatTable FlattenBatches(const Schema& schema, const std::vector<Batch>& 
         t.rows += b.RowCount();
 
         for (std::size_t c = 0; c < schema.size(); ++c) {
-            const auto& col = b.GetColumn(c);
-            const auto& cs = schema[c];
-            if (cs.type == DataType::Int64) {
-                const auto& v = std::get<std::vector<std::int64_t>>(col);
-                auto& out = std::get<std::vector<std::int64_t>>(t.columns[c]);
-                out.insert(out.end(), v.begin(), v.end());
-            } else {
-                const auto& v = std::get<std::vector<std::string>>(col);
-                auto& out = std::get<std::vector<std::string>>(t.columns[c]);
-                out.insert(out.end(), v.begin(), v.end());
-            }
+            std::visit([&](auto &out) {
+                using V = std::decay_t<decltype(out)>;
+                const auto &src = std::get<V>(b.GetColumn(c));
+                out.insert(out.end(), src.begin(), src.end());
+            }, t.columns[c]);
         }
     }
 
-    // sanity sizes
     for (std::size_t c = 0; c < schema.size(); ++c) {
-        const auto& cs = schema[c];
-        if (cs.type == DataType::Int64) {
-            EXPECT_EQ(std::get<std::vector<std::int64_t>>(t.columns[c]).size(), t.rows);
-        } else {
-            EXPECT_EQ(std::get<std::vector<std::string>>(t.columns[c]).size(), t.rows);
-        }
+        std::visit([&](const auto &v) {
+            EXPECT_EQ(v.size(), t.rows);
+        }, t.columns[c]);
     }
 
     return t;

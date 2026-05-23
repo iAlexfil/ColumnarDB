@@ -32,15 +32,39 @@ namespace utils {
 enum class DataType : uint8_t {
 	Int64 = 0,
 	String = 1,
+	Int8 = 2,
+	Int16 = 3,
+	Int32 = 4,
+	UInt8 = 5,
+	UInt16 = 6,
+	UInt32 = 7,
+	UInt64 = 8,
+	Float32 = 9,
+	Float64 = 10,
+	Date = 11,
+	DateTime = 12,
 };
 
-using DataObject = std::variant<int64_t, std::string>;
-using DataVector = std::variant<std::vector<int64_t>, std::vector<std::string> >;
+using DataObject = std::variant<
+	std::int8_t, std::int16_t, std::int32_t, std::int64_t,
+	std::uint8_t, std::uint16_t, std::uint32_t, std::uint64_t,
+	float, double,
+	std::string
+>;
+
+using DataVector = std::variant<
+	std::vector<std::int8_t>, std::vector<std::int16_t>,
+	std::vector<std::int32_t>, std::vector<std::int64_t>,
+	std::vector<std::uint8_t>, std::vector<std::uint16_t>,
+	std::vector<std::uint32_t>, std::vector<std::uint64_t>,
+	std::vector<float>, std::vector<double>,
+	std::vector<std::string>
+>;
 
 namespace utils {
-	inline int64_t ParseInt64(std::string_view s,
-	                          std::size_t line_no,
-	                          std::string_view col_name) {
+	inline std::int64_t ParseInt64(std::string_view s,
+	                               std::size_t line_no,
+	                               std::string_view col_name) {
 		s = Trim(s, [](unsigned char ch) {
 			return ch == ' ' || ch == '\t' || ch == '\n' || ch == '\r' || ch == '\f' || ch == '\v';
 		});
@@ -49,11 +73,9 @@ namespace utils {
 				"CSV parse error at line " + std::to_string(line_no) +
 				": column '" + std::string(col_name) + "' expects int64, got empty value");
 		}
-
-		int64_t value = 0;
+		std::int64_t value = 0;
 		const char *first = s.data();
 		const char *last = s.data() + s.size();
-
 		auto [ptr, ec] = std::from_chars(first, last, value, 10);
 		if (ec != std::errc{} || ptr != last) {
 			throw std::runtime_error(
@@ -63,7 +85,6 @@ namespace utils {
 		return value;
 	}
 }
-
 
 namespace utils {
 	inline void Seek(std::ifstream &in, std::uint64_t pos) {
