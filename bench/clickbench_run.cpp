@@ -5,6 +5,8 @@
 #include <iomanip>
 #include <iostream>
 #include <memory>
+#include <set>
+#include <sstream>
 #include <stdexcept>
 #include <string>
 #include <utility>
@@ -1046,30 +1048,62 @@ namespace {
 }
 
 int main(int argc, char **argv) {
-	if (argc != 3) {
-		std::cerr << "Usage: " << argv[0] << " <hits.columnar> <output_dir>\n";
+	std::string input, schema, output_dir, queries_filter;
+
+	for (int i = 1; i < argc; ++i) {
+		std::string a = argv[i];
+		auto next = [&]() -> std::string {
+			if (i + 1 >= argc) throw std::runtime_error("missing value for " + a);
+			return argv[++i];
+		};
+		if (a == "--input")       input = next();
+		else if (a == "--schema") schema = next();
+		else if (a == "--output_dir") output_dir = next();
+		else if (a.rfind("--queries=", 0) == 0) queries_filter = a.substr(10);
+		else if (a == "--queries") queries_filter = next();
+		else {
+			std::cerr << "Unknown flag: " << a << "\n";
+			return 1;
+		}
+	}
+
+	if (input.empty() || output_dir.empty()) {
+		std::cerr << "Usage: " << argv[0]
+		          << " --input <hits.columnar> --output_dir <dir>"
+		             " [--schema <hits.schema>] [--queries N]\n";
 		return 1;
 	}
+
+	std::set<int> only_queries;
+	if (!queries_filter.empty()) {
+		std::stringstream ss(queries_filter);
+		std::string tok;
+		while (std::getline(ss, tok, ',')) {
+			if (!tok.empty()) only_queries.insert(std::stoi(tok));
+		}
+	}
+
 	try {
-		columnar::ColumnarReader rdr(argv[1]);
-		const fs::path output_dir = argv[2];
+		columnar::ColumnarReader rdr(input);
 		fs::create_directories(output_dir);
 
-		std::cout << "file=" << argv[1]
-				<< " columns=" << rdr.GetSchema().size()
-				<< " batches=" << rdr.NumBatches() << "\n\n";
+		std::cout << "file=" << input
+		          << " columns=" << rdr.GetSchema().size()
+		          << " batches=" << rdr.NumBatches() << "\n\n";
 
-		for (const auto &q: kQueries) {
+		for (const auto &q : kQueries) {
+			if (!only_queries.empty() && !only_queries.count(q.index)) continue;
+
 			const auto t0 = std::chrono::steady_clock::now();
 			try {
 				Plan plan = q.build(rdr);
-				const fs::path csv_path = output_dir / ("q" + FormatIndex(q.index) + ".csv");
+				const fs::path csv_path = fs::path(output_dir) / ("q" + FormatIndex(q.index) + ".csv");
 				WritePlanToCsv(*plan.root, csv_path);
 
 				const double secs = std::chrono::duration<double>(
 					std::chrono::steady_clock::now() - t0).count();
 				std::cout << "[Q" << q.index << "] " << std::fixed << std::setprecision(3)
-						<< secs << "s OK -> " << csv_path.filename().string() << "\n";
+				          << secs << "s OK -> " << csv_path.filename().string() << "\n";
 			} catch (const std::exception &e) {
 				std::cout << "[Q" << q.index << "] FAIL: " << e.what() << "\n";
 			}

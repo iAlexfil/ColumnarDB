@@ -88,6 +88,15 @@ target_link_libraries(exec PUBLIC
         utils
 )
 
+add_executable(csv_to_columnar exe/csv_to_columnar.cpp)
+target_link_libraries(csv_to_columnar PRIVATE
+        csv
+        schema
+        batch
+        columnar
+        utils
+)
+
 add_executable(clickbench_run bench/clickbench_run.cpp)
 target_link_libraries(clickbench_run PRIVATE
         csv
