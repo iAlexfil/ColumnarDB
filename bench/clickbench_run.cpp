@@ -113,6 +113,25 @@ GroupAggSpec Distinct(std::string name, ExprPtr e) {
 
 ExprPtr Ne(ExprPtr a, ExprPtr b) { return exec::MakeCompare(std::move(a), exec::CmpOp::Ne, std::move(b)); }
 ExprPtr Eq(ExprPtr a, ExprPtr b) { return exec::MakeCompare(std::move(a), exec::CmpOp::Eq, std::move(b)); }
+ExprPtr Ge(ExprPtr a, ExprPtr b) { return exec::MakeCompare(std::move(a), exec::CmpOp::Ge, std::move(b)); }
+ExprPtr Le(ExprPtr a, ExprPtr b) { return exec::MakeCompare(std::move(a), exec::CmpOp::Le, std::move(b)); }
+ExprPtr Add(ExprPtr a, ExprPtr b) { return exec::MakeArith(std::move(a), exec::ArithOp::Add, std::move(b)); }
+ExprPtr Sub(ExprPtr a, ExprPtr b) { return exec::MakeArith(std::move(a), exec::ArithOp::Sub, std::move(b)); }
+ExprPtr Mul(ExprPtr a, ExprPtr b) { return exec::MakeArith(std::move(a), exec::ArithOp::Mul, std::move(b)); }
+
+template<class... Args>
+ExprPtr AndN(Args &&...args) {
+	std::vector<ExprPtr> v;
+	(v.push_back(std::forward<Args>(args)), ...);
+	return exec::MakeLogical(exec::LogOp::And, std::move(v));
+}
+
+template<class... Args>
+ExprPtr InList(ExprPtr lhs, Args &&...consts) {
+	std::vector<ExprPtr> v;
+	(v.push_back(std::forward<Args>(consts)), ...);
+	return exec::MakeInList(std::move(lhs), std::move(v));
+}
 
 using SK = std::pair<ExprPtr, bool>;
 
@@ -519,6 +538,159 @@ Plan Q34(columnar::ColumnarReader &rdr) {
 	return p;
 }
 
+// Q29: SELECT SUM(ResolutionWidth), SUM(ResolutionWidth+1), ..., SUM(ResolutionWidth+89) FROM hits
+Plan Q29(columnar::ColumnarReader &rdr) {
+	Plan p;
+	AddScan(p, rdr, {"ResolutionWidth"});
+	AddHashAgg(p, {}, Aggs(
+		Sum("sum_width", C(p, "ResolutionWidth")),
+		CountStar("c")));
+	std::vector<KV> outs;
+	for (int i = 0; i < 90; ++i) {
+		std::string name = "s" + std::to_string(i);
+		if (i == 0) {
+			outs.emplace_back(name, C(p, "sum_width"));
+		} else {
+			outs.emplace_back(name, Add(C(p, "sum_width"), Mul(C(p, "c"), exec::MakeConstI64(i))));
+		}
+	}
+	AddProject(p, std::move(outs));
+	return p;
+}
+
+// Q35: SELECT ClientIP, ClientIP-1, ClientIP-2, ClientIP-3, COUNT(*) AS c
+//      FROM hits GROUP BY ClientIP, ClientIP-1, ClientIP-2, ClientIP-3 ORDER BY c DESC LIMIT 10
+Plan Q35(columnar::ColumnarReader &rdr) {
+	Plan p;
+	AddScan(p, rdr, {"ClientIP"});
+	AddHashAgg(p,
+		Cols(KV{"ClientIP", C(p, "ClientIP")}),
+		Aggs(CountStar("c")));
+	AddTopK(p, SortKeys(SK{C(p, "c"), false}), 10);
+	AddProject(p, Cols(
+		KV{"ClientIP", C(p, "ClientIP")},
+		KV{"ClientIP_1", Sub(C(p, "ClientIP"), exec::MakeConstI64(1))},
+		KV{"ClientIP_2", Sub(C(p, "ClientIP"), exec::MakeConstI64(2))},
+		KV{"ClientIP_3", Sub(C(p, "ClientIP"), exec::MakeConstI64(3))},
+		KV{"c", C(p, "c")}));
+	return p;
+}
+
+ExprPtr CommonDateFilter(const Plan &p) {
+	return AndN(
+		Eq(C(p, "CounterID"), exec::MakeConstI64(62)),
+		Ge(C(p, "EventDate"), exec::MakeConstDate(15887)),
+		Le(C(p, "EventDate"), exec::MakeConstDate(15917)));
+}
+
+// Q36: SELECT URL, COUNT(*) AS PageViews FROM hits
+//      WHERE CounterID=62 AND EventDate>='2013-07-01' AND EventDate<='2013-07-31'
+//      AND DontCountHits=0 AND IsRefresh=0 AND URL<>'' GROUP BY URL ORDER BY PageViews DESC LIMIT 10
+Plan Q36(columnar::ColumnarReader &rdr) {
+	Plan p;
+	AddScan(p, rdr, {"CounterID", "EventDate", "DontCountHits", "IsRefresh", "URL"});
+	AddFilter(p, AndN(
+		CommonDateFilter(p),
+		Eq(C(p, "DontCountHits"), exec::MakeConstI64(0)),
+		Eq(C(p, "IsRefresh"), exec::MakeConstI64(0)),
+		Ne(C(p, "URL"), exec::MakeConstStr(""))));
+	AddHashAgg(p,
+		Cols(KV{"URL", C(p, "URL")}),
+		Aggs(CountStar("PageViews")));
+	AddTopK(p, SortKeys(SK{C(p, "PageViews"), false}), 10);
+	AddProject(p, Cols(KV{"URL", C(p, "URL")}, KV{"PageViews", C(p, "PageViews")}));
+	return p;
+}
+
+// Q37: same as Q36 but Title instead of URL
+Plan Q37(columnar::ColumnarReader &rdr) {
+	Plan p;
+	AddScan(p, rdr, {"CounterID", "EventDate", "DontCountHits", "IsRefresh", "Title"});
+	AddFilter(p, AndN(
+		CommonDateFilter(p),
+		Eq(C(p, "DontCountHits"), exec::MakeConstI64(0)),
+		Eq(C(p, "IsRefresh"), exec::MakeConstI64(0)),
+		Ne(C(p, "Title"), exec::MakeConstStr(""))));
+	AddHashAgg(p,
+		Cols(KV{"Title", C(p, "Title")}),
+		Aggs(CountStar("PageViews")));
+	AddTopK(p, SortKeys(SK{C(p, "PageViews"), false}), 10);
+	AddProject(p, Cols(KV{"Title", C(p, "Title")}, KV{"PageViews", C(p, "PageViews")}));
+	return p;
+}
+
+// Q38: SELECT URL, COUNT(*) AS PageViews FROM hits
+//      WHERE CounterID=62 AND EventDate>='2013-07-01' AND EventDate<='2013-07-31'
+//      AND IsRefresh=0 AND IsLink<>0 AND IsDownload=0
+//      GROUP BY URL ORDER BY PageViews DESC LIMIT 10 OFFSET 1000
+Plan Q38(columnar::ColumnarReader &rdr) {
+	Plan p;
+	AddScan(p, rdr, {"CounterID", "EventDate", "IsRefresh", "IsLink", "IsDownload", "URL"});
+	AddFilter(p, AndN(
+		CommonDateFilter(p),
+		Eq(C(p, "IsRefresh"), exec::MakeConstI64(0)),
+		Ne(C(p, "IsLink"), exec::MakeConstI64(0)),
+		Eq(C(p, "IsDownload"), exec::MakeConstI64(0))));
+	AddHashAgg(p,
+		Cols(KV{"URL", C(p, "URL")}),
+		Aggs(CountStar("PageViews")));
+	AddOp(p, std::make_unique<exec::Sort>(*p.root,
+		SortKeys(SK{C(p, "PageViews"), false}), 10, 1000));
+	AddProject(p, Cols(KV{"URL", C(p, "URL")}, KV{"PageViews", C(p, "PageViews")}));
+	return p;
+}
+
+// Q40: SELECT URLHash, EventDate, COUNT(*) AS PageViews FROM hits
+//      WHERE CounterID=62 AND EventDate>='2013-07-01' AND EventDate<='2013-07-31'
+//      AND IsRefresh=0 AND TraficSourceID IN (-1,6) AND RefererHash=3594120000172545465
+//      GROUP BY URLHash, EventDate ORDER BY PageViews DESC LIMIT 10 OFFSET 100
+Plan Q40(columnar::ColumnarReader &rdr) {
+	Plan p;
+	AddScan(p, rdr, {"CounterID", "EventDate", "IsRefresh", "TraficSourceID", "RefererHash", "URLHash"});
+	AddFilter(p, AndN(
+		CommonDateFilter(p),
+		Eq(C(p, "IsRefresh"), exec::MakeConstI64(0)),
+		InList(C(p, "TraficSourceID"), exec::MakeConstI64(-1), exec::MakeConstI64(6)),
+		Eq(C(p, "RefererHash"), exec::MakeConstI64(3594120000172545465LL))));
+	AddHashAgg(p,
+		Cols(KV{"URLHash", C(p, "URLHash")}, KV{"EventDate", C(p, "EventDate")}),
+		Aggs(CountStar("PageViews")));
+	AddOp(p, std::make_unique<exec::Sort>(*p.root,
+		SortKeys(SK{C(p, "PageViews"), false}), 10, 100));
+	AddProject(p, Cols(
+		KV{"URLHash", C(p, "URLHash")},
+		KV{"EventDate", C(p, "EventDate")},
+		KV{"PageViews", C(p, "PageViews")}));
+	return p;
+}
+
+// Q41: SELECT WindowClientWidth, WindowClientHeight, COUNT(*) AS PageViews FROM hits
+//      WHERE CounterID=62 AND EventDate>='2013-07-01' AND EventDate<='2013-07-31'
+//      AND IsRefresh=0 AND DontCountHits=0 AND URLHash=2868770270353813622
+//      GROUP BY WindowClientWidth, WindowClientHeight ORDER BY PageViews DESC LIMIT 10 OFFSET 10000
+Plan Q41(columnar::ColumnarReader &rdr) {
+	Plan p;
+	AddScan(p, rdr, {"CounterID", "EventDate", "IsRefresh", "DontCountHits", "URLHash",
+	                 "WindowClientWidth", "WindowClientHeight"});
+	AddFilter(p, AndN(
+		CommonDateFilter(p),
+		Eq(C(p, "IsRefresh"), exec::MakeConstI64(0)),
+		Eq(C(p, "DontCountHits"), exec::MakeConstI64(0)),
+		Eq(C(p, "URLHash"), exec::MakeConstI64(2868770270353813622LL))));
+	AddHashAgg(p,
+		Cols(
+			KV{"WindowClientWidth", C(p, "WindowClientWidth")},
+			KV{"WindowClientHeight", C(p, "WindowClientHeight")}),
+		Aggs(CountStar("PageViews")));
+	AddOp(p, std::make_unique<exec::Sort>(*p.root,
+		SortKeys(SK{C(p, "PageViews"), false}), 10, 10000));
+	AddProject(p, Cols(
+		KV{"WindowClientWidth", C(p, "WindowClientWidth")},
+		KV{"WindowClientHeight", C(p, "WindowClientHeight")},
+		KV{"PageViews", C(p, "PageViews")}));
+	return p;
+}
+
 // Q19: SELECT UserID FROM hits WHERE UserID = 435090932899640449
 Plan Q19(columnar::ColumnarReader &rdr) {
 	Plan p;
@@ -555,7 +727,14 @@ const std::vector<QueryEntry> kQueries = {
 	{"Q31", &Q31},
 	{"Q32", &Q32},
 	{"Q33", &Q33},
+	{"Q29", &Q29},
 	{"Q34", &Q34},
+	{"Q35", &Q35},
+	{"Q36", &Q36},
+	{"Q37", &Q37},
+	{"Q38", &Q38},
+	{"Q40", &Q40},
+	{"Q41", &Q41},
 };
 
 std::string CellToString(const DataVector &col, std::size_t row) {

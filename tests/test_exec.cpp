@@ -473,6 +473,96 @@ TEST(ExecProject, PassthroughAndConst) {
 	EXPECT_EQ(one, (std::vector<std::int64_t>{1, 1, 1}));
 }
 
+TEST(ExecExpr, ArithAddSub) {
+	const auto p = TmpPath("arith");
+	WriteSampleFile(p, {1,2,3,4}, {10,20,30,40}, {"","","",""}, 4);
+
+	columnar::ColumnarReader rdr(p);
+	exec::Scan scan(rdr, std::vector<std::string>{"a", "b"});
+
+	std::vector<std::pair<std::string, exec::ExprPtr>> outs;
+	outs.emplace_back("a_plus_b",
+		exec::MakeArith(
+			exec::MakeColumnByName(scan.OutputSchema(), "a"),
+			exec::ArithOp::Add,
+			exec::MakeColumnByName(scan.OutputSchema(), "b")));
+	outs.emplace_back("a_times_10",
+		exec::MakeArith(
+			exec::MakeColumnByName(scan.OutputSchema(), "a"),
+			exec::ArithOp::Mul,
+			exec::MakeConstI64(10)));
+	exec::Project proj(scan, std::move(outs));
+
+	auto eb = proj.Next();
+	ASSERT_TRUE(eb.has_value());
+	const auto &c0 = std::get<std::vector<std::int64_t>>(eb->batch->GetColumn(0));
+	const auto &c1 = std::get<std::vector<std::int64_t>>(eb->batch->GetColumn(1));
+	EXPECT_EQ(c0, (std::vector<std::int64_t>{11, 22, 33, 44}));
+	EXPECT_EQ(c1, (std::vector<std::int64_t>{10, 20, 30, 40}));
+}
+
+TEST(ExecExpr, LogicalAndOrNot) {
+	const auto p = TmpPath("logical");
+	WriteSampleFile(p, {1,2,3,4,5,6}, {10,20,30,40,50,60}, {"","","","","",""}, 4);
+
+	columnar::ColumnarReader rdr(p);
+	exec::Scan scan(rdr, std::vector<std::string>{"a", "b"});
+
+	std::vector<exec::ExprPtr> and_args;
+	and_args.push_back(exec::MakeCompare(
+		exec::MakeColumnByName(scan.OutputSchema(), "a"),
+		exec::CmpOp::Gt, exec::MakeConstI64(2)));
+	and_args.push_back(exec::MakeCompare(
+		exec::MakeColumnByName(scan.OutputSchema(), "b"),
+		exec::CmpOp::Le, exec::MakeConstI64(50)));
+
+	auto pred = exec::MakeLogical(exec::LogOp::And, std::move(and_args));
+	exec::Filter filter(scan, std::move(pred));
+
+	std::size_t total = 0;
+	while (auto eb = filter.Next()) total += eb->size();
+	EXPECT_EQ(total, 3u);
+}
+
+TEST(ExecExpr, InListInt) {
+	const auto p = TmpPath("inlist");
+	WriteSampleFile(p, {1,2,3,4,5}, {0,0,0,0,0}, {"","","","",""}, 4);
+
+	columnar::ColumnarReader rdr(p);
+	exec::Scan scan(rdr, std::vector<std::string>{"a"});
+
+	std::vector<exec::ExprPtr> consts;
+	consts.push_back(exec::MakeConstI64(2));
+	consts.push_back(exec::MakeConstI64(4));
+	auto pred = exec::MakeInList(
+		exec::MakeColumnByName(scan.OutputSchema(), "a"),
+		std::move(consts));
+	exec::Filter filter(scan, std::move(pred));
+
+	std::size_t total = 0;
+	while (auto eb = filter.Next()) total += eb->size();
+	EXPECT_EQ(total, 2u);
+}
+
+TEST(ExecExpr, NotPredicate) {
+	const auto p = TmpPath("not_pred");
+	WriteSampleFile(p, {1,2,3,4}, {0,0,0,0}, {"","","",""}, 4);
+
+	columnar::ColumnarReader rdr(p);
+	exec::Scan scan(rdr, std::vector<std::string>{"a"});
+
+	std::vector<exec::ExprPtr> not_args;
+	not_args.push_back(exec::MakeCompare(
+		exec::MakeColumnByName(scan.OutputSchema(), "a"),
+		exec::CmpOp::Eq, exec::MakeConstI64(3)));
+	auto pred = exec::MakeLogical(exec::LogOp::Not, std::move(not_args));
+	exec::Filter filter(scan, std::move(pred));
+
+	std::size_t total = 0;
+	while (auto eb = filter.Next()) total += eb->size();
+	EXPECT_EQ(total, 3u);
+}
+
 TEST(ExecQ0, CountStarSmall) {
 	const auto p = TmpPath("q0_small");
 	WriteSampleFile(p, {1,2,3,4,5}, {10,20,30,40,50}, {"a","b","c","d","e"}, 2);

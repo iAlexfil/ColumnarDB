@@ -44,7 +44,9 @@ public:
 
 using ExprPtr = std::unique_ptr<Expr>;
 
-enum class CmpOp { Eq, Ne, Lt, Le, Gt, Ge };
+enum class CmpOp   { Eq, Ne, Lt, Le, Gt, Ge };
+enum class LogOp   { And, Or, Not };
+enum class ArithOp { Add, Sub, Mul, Div, Mod };
 
 ExprPtr MakeColumn(const Schema &s, std::size_t idx);
 ExprPtr MakeColumnByName(const Schema &s, std::string_view name);
@@ -57,6 +59,9 @@ ExprPtr MakeConstDate(std::int64_t days);
 ExprPtr MakeConstDateTime(std::int64_t seconds);
 
 ExprPtr MakeCompare(ExprPtr l, CmpOp op, ExprPtr r);
+ExprPtr MakeLogical(LogOp op, std::vector<ExprPtr> args);
+ExprPtr MakeArith(ExprPtr l, ArithOp op, ExprPtr r);
+ExprPtr MakeInList(ExprPtr lhs, std::vector<ExprPtr> consts);
 
 std::size_t ColumnIndexByName(const Schema &s, std::string_view name);
 bool IsIntegerLike(EvalType t);
