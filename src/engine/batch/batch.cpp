@@ -3,6 +3,7 @@
 #include <stdexcept>
 #include <string>
 #include <string_view>
+#include <type_traits>
 
 #include "utils/parse.h"
 
@@ -53,23 +54,26 @@ void Batch::AppendRow(const Row &row, std::size_t line_no) {
 		const auto &cs = schema_[i];
 		const std::string &field = row[i];
 
-		switch (cs.type) {
-			case DataType::Int8:     std::get<std::vector<std::int8_t>>(columns_[i]).push_back(utils::ParseInteger<std::int8_t>(field, line_no, cs.name)); break;
-			case DataType::Int16:    std::get<std::vector<std::int16_t>>(columns_[i]).push_back(utils::ParseInteger<std::int16_t>(field, line_no, cs.name)); break;
-			case DataType::Int32:    std::get<std::vector<std::int32_t>>(columns_[i]).push_back(utils::ParseInteger<std::int32_t>(field, line_no, cs.name)); break;
-			case DataType::Int64:    std::get<std::vector<std::int64_t>>(columns_[i]).push_back(utils::ParseInteger<std::int64_t>(field, line_no, cs.name)); break;
-			case DataType::UInt8:    std::get<std::vector<std::uint8_t>>(columns_[i]).push_back(utils::ParseInteger<std::uint8_t>(field, line_no, cs.name)); break;
-			case DataType::UInt16:   std::get<std::vector<std::uint16_t>>(columns_[i]).push_back(utils::ParseInteger<std::uint16_t>(field, line_no, cs.name)); break;
-			case DataType::UInt32:   std::get<std::vector<std::uint32_t>>(columns_[i]).push_back(utils::ParseInteger<std::uint32_t>(field, line_no, cs.name)); break;
-			case DataType::UInt64:   std::get<std::vector<std::uint64_t>>(columns_[i]).push_back(utils::ParseInteger<std::uint64_t>(field, line_no, cs.name)); break;
-			case DataType::Float32:  std::get<std::vector<float>>(columns_[i]).push_back(utils::ParseFloating<float>(field, line_no, cs.name)); break;
-			case DataType::Float64:  std::get<std::vector<double>>(columns_[i]).push_back(utils::ParseFloating<double>(field, line_no, cs.name)); break;
-			case DataType::String:   std::get<std::vector<std::string>>(columns_[i]).push_back(field); break;
-			case DataType::Date:     std::get<std::vector<std::int32_t>>(columns_[i]).push_back(utils::ParseDate(field, line_no, cs.name)); break;
-			case DataType::DateTime: std::get<std::vector<std::int64_t>>(columns_[i]).push_back(utils::ParseDateTime(field, line_no, cs.name)); break;
-			default:
-				throw std::runtime_error("unsupported DataType in schema");
-		}
+		std::visit([&](auto &vec) {
+			using T = typename std::decay_t<decltype(vec)>::value_type;
+			if constexpr (std::is_same_v<T, std::string>) {
+				vec.push_back(field);
+			} else if constexpr (std::is_floating_point_v<T>) {
+				vec.push_back(utils::ParseFloating<T>(field, line_no, cs.name));
+			} else if constexpr (std::is_same_v<T, std::int32_t>) {
+				if (cs.type == DataType::Date)
+					vec.push_back(utils::ParseDate(field, line_no, cs.name));
+				else
+					vec.push_back(utils::ParseInteger<T>(field, line_no, cs.name));
+			} else if constexpr (std::is_same_v<T, std::int64_t>) {
+				if (cs.type == DataType::DateTime)
+					vec.push_back(utils::ParseDateTime(field, line_no, cs.name));
+				else
+					vec.push_back(utils::ParseInteger<T>(field, line_no, cs.name));
+			} else {
+				vec.push_back(utils::ParseInteger<T>(field, line_no, cs.name));
+			}
+		}, columns_[i]);
 	}
 
 	++row_count_;

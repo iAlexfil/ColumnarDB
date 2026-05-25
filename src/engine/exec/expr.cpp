@@ -5,6 +5,7 @@
 #include "exprs/logical.h"
 #include "exprs/arith.h"
 #include "exprs/in_list.h"
+#include "exprs/if.h"
 
 namespace exec {
 
@@ -97,6 +98,10 @@ ExprPtr MakeArith(ExprPtr l, ArithOp op, ExprPtr r) {
 
 ExprPtr MakeInList(ExprPtr lhs, std::vector<ExprPtr> consts) {
 	return std::make_unique<detail::InListExpr>(std::move(lhs), std::move(consts));
+}
+
+ExprPtr MakeIf(ExprPtr cond, ExprPtr t, ExprPtr f) {
+	return std::make_unique<detail::IfExpr>(std::move(cond), std::move(t), std::move(f));
 }
 
 }

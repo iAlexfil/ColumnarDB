@@ -1,4 +1,3 @@
-// Этот файл с тестами сгенерирован с помощью LLM
 #include <gtest/gtest.h>
 
 #include <cstdint>
@@ -20,7 +19,6 @@
 
 namespace fs = std::filesystem;
 
-// ----------------- helpers -----------------
 
 static fs::path MakeTempDir() {
     const auto base = fs::temp_directory_path();
@@ -59,7 +57,7 @@ static void WriteString(std::ofstream& out, const std::string& s) {
 
 struct FlatTable {
     Schema schema;
-    std::vector<DataVector> columns; // match schema types
+    std::vector<DataVector> columns;
     std::size_t rows = 0;
 };
 
@@ -206,7 +204,6 @@ static void ExportColumnarToCsv(const fs::path& col_path,
     }
 }
 
-// Write columnar from CSV files using CsvBatchReader + ColumnarWriter
 static void CsvToColumnar(const fs::path& schema_path,
                           const fs::path& data_path,
                           const fs::path& col_path,
@@ -228,7 +225,6 @@ static void CsvToColumnar(const fs::path& schema_path,
     wr.Finish();
 }
 
-// ----------------- round-trip tests -----------------
 
 TEST(ColumnarRoundTrip, MultiRowGroupAndCsvEscaping) {
     const std::string schema_csv =
@@ -237,12 +233,6 @@ TEST(ColumnarRoundTrip, MultiRowGroupAndCsvEscaping) {
         "c,int64\n"
         "note,string\n";
 
-    // Covers:
-    // - commas inside quoted field
-    // - double quotes inside quoted field (escaped as "")
-    // - newline inside quoted field
-    // - empty field (,,)
-    // - empty string ("")
     const std::string data_csv =
         "1,hello,10,plain\n"
         "2,\"has,comma\",20,\"quote:\"\"x\"\"\"\n"
@@ -278,8 +268,8 @@ TEST(ColumnarRoundTrip, SingleRowGroup_Int64BoundariesAndWeirdStrings) {
         "s,string\n";
 
     const std::string data_csv =
-        "-9223372036854775808,\"\"\n"                    // int64 min, empty string
-        "9223372036854775807,\"leading space\"\n"        // int64 max
+        "-9223372036854775808,\"\"\n"
+        "9223372036854775807,\"leading space\"\n"
         "0,\"trailing space \"\n"
         "42,\"tab\tinside\"\n"
         "-7,\"carriage\rreturn\"\n"
@@ -313,11 +303,10 @@ TEST(ColumnarRoundTrip, CRLFAndNoFinalNewline) {
         "a,int64\r\n"
         "b,string\r\n";
 
-    // CRLF endings + last line has no newline
     const std::string data_csv =
         "1,hello\r\n"
         "2,\"x\r\ny\"\r\n"
-        "3,tail"; // no trailing newline
+        "3,tail";
 
     auto tmp = MakeTempDir();
     const fs::path schema_path = tmp / "schema.csv";
@@ -347,7 +336,7 @@ TEST(ColumnarRoundTrip, EmptyDataFileProducesZeroRowGroups) {
         "a,int64\n"
         "b,string\n";
 
-    const std::string data_csv = ""; // empty dataset
+    const std::string data_csv = "";
 
     auto tmp = MakeTempDir();
     const fs::path schema_path = tmp / "schema.csv";
@@ -367,7 +356,6 @@ TEST(ColumnarRoundTrip, EmptyDataFileProducesZeroRowGroups) {
     columnar::ColumnarReader reader(col_path);
     EXPECT_EQ(reader.NumBatches(), 0u);
 
-    // Export back and ensure it still parses to 0 rows
     ExportColumnarToCsv(col_path, schema2_path, data2_path);
     FlatTable got2 = ReadAllFromCsvFiles(schema2_path, data2_path, /*batch_rows*/ 10);
     ExpectTablesEqual(expected, got2);
@@ -378,12 +366,11 @@ TEST(ColumnarRoundTrip, SkipsAllEmptyLinesInData) {
         "a,int64\n"
         "b,string\n";
 
-    // CsvBatchReader::IsAllEmpty skips lines where all fields are empty/whitespace
     const std::string data_csv =
         "\n"
-        "   ,   \n"      // 2 fields, both whitespace -> should be skipped
+        "   ,   \n"
         "1,ok\n"
-        ",\n"            // 2 empty fields -> should be skipped
+        ",\n"
         "2,yes\n";
 
     auto tmp = MakeTempDir();
@@ -395,7 +382,7 @@ TEST(ColumnarRoundTrip, SkipsAllEmptyLinesInData) {
     WriteFile(data_path, data_csv);
 
     FlatTable expected = ReadAllFromCsvFiles(schema_path, data_path, /*batch_rows*/ 1);
-    ASSERT_EQ(expected.rows, 2u); // only (1,ok) and (2,yes)
+    ASSERT_EQ(expected.rows, 2u);
 
     CsvToColumnar(schema_path, data_path, col_path, /*batch_rows*/ 1);
 
@@ -408,8 +395,7 @@ TEST(ColumnarRoundTrip, VeryLongStrings) {
         "id,int64\n"
         "payload,string\n";
 
-    std::string big(200000, 'A'); // 200 KB string
-    // Quote it to ensure CSVWriter/Reader behavior if commas/newlines were present (here none)
+    std::string big(200000, 'A');
     const std::string data_csv =
         "1," + big + "\n"
         "2," + big + "\n";
@@ -431,7 +417,6 @@ TEST(ColumnarRoundTrip, VeryLongStrings) {
     ExpectTablesEqual(expected, got);
 }
 
-// ----------------- negative tests (errors) -----------------
 
 TEST(SchemaErrors, DuplicateColumnNameThrows) {
     std::istringstream in(
@@ -471,7 +456,7 @@ TEST(CsvBatchReaderErrors, InvalidInt64Throws) {
 
 TEST(CsvBatchReaderErrors, WrongFieldCountThrows) {
     const std::string schema_csv = "a,int64\nb,string\n";
-    const std::string data_csv   = "1,ok,EXTRA\n"; // 3 fields, expected 2
+    const std::string data_csv   = "1,ok,EXTRA\n";
 
     auto tmp = MakeTempDir();
     const fs::path schema_path = tmp / "schema.csv";
@@ -501,7 +486,7 @@ TEST(ColumnarErrors, ReaderRejectsBadMagic) {
     const char magic[4] = {'B','A','D','!'};
     WriteBytes(out, magic, 4);
     WriteObj(out, (std::uint32_t)1);
-    WriteObj(out, (std::uint64_t)16); // some offset
+    WriteObj(out, (std::uint64_t)16);
     out.flush();
 
     EXPECT_THROW({ columnar::ColumnarReader r(p); }, std::runtime_error);
@@ -516,7 +501,7 @@ TEST(ColumnarErrors, ReaderRejectsBadVersion) {
 
     const char magic[4] = {'C','D','B','1'};
     WriteBytes(out, magic, 4);
-    WriteObj(out, (std::uint32_t)999);    // bad version
+    WriteObj(out, (std::uint32_t)999);
     WriteObj(out, (std::uint64_t)16);
     out.flush();
 
@@ -533,7 +518,7 @@ TEST(ColumnarErrors, ReaderRejectsZeroFooterOffset) {
     const char magic[4] = {'C','D','B','1'};
     WriteBytes(out, magic, 4);
     WriteObj(out, (std::uint32_t)1);
-    WriteObj(out, (std::uint64_t)0); // not finalized
+    WriteObj(out, (std::uint64_t)0);
     out.flush();
 
     EXPECT_THROW({ columnar::ColumnarReader r(p); }, std::runtime_error);
@@ -546,24 +531,20 @@ TEST(ColumnarErrors, ReaderRejectsChunkOverlapsFooter) {
     std::ofstream out(p, std::ios::binary | std::ios::trunc);
     ASSERT_TRUE(out.is_open());
 
-    // header
     const char magic[4] = {'C','D','B','1'};
     WriteBytes(out, magic, 4);
     WriteObj(out, (std::uint32_t)1);
 
-    // We'll place footer at offset 16 (right after header). Then declare a chunk that overlaps footer.
     const std::uint64_t footer_offset = 16;
     WriteObj(out, footer_offset);
 
-    // footer at 16:
-    // ncols=1, col{name="a", type=int64}, nrg=1, rg{row_count=1, chunk_offset=0, chunk_size=100}
-    WriteObj(out, (std::uint32_t)1);        // ncols
-    WriteString(out, "a");                  // name
-    WriteObj(out, (std::uint8_t)0);         // type int64 (DataType::Int64 == 0)
-    WriteObj(out, (std::uint32_t)1);        // nrg
-    WriteObj(out, (std::uint32_t)1);        // row_count
-    WriteObj(out, (std::uint64_t)0);        // chunk_offset
-    WriteObj(out, (std::uint64_t)100);      // chunk_size => overlaps footer_offset(16)
+    WriteObj(out, (std::uint32_t)1);
+    WriteString(out, "a");
+    WriteObj(out, (std::uint8_t)0);
+    WriteObj(out, (std::uint32_t)1);
+    WriteObj(out, (std::uint32_t)1);
+    WriteObj(out, (std::uint64_t)0);
+    WriteObj(out, (std::uint64_t)100);
 
     out.flush();
 

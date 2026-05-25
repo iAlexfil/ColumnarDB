@@ -14,6 +14,7 @@
 #include "columnar_writer.h"
 #include "expr.h"
 #include "filter.h"
+#include "func.h"
 #include "hash_aggregate.h"
 #include "project.h"
 #include "scan.h"
@@ -561,6 +562,113 @@ TEST(ExecExpr, NotPredicate) {
 	std::size_t total = 0;
 	while (auto eb = filter.Next()) total += eb->size();
 	EXPECT_EQ(total, 3u);
+}
+
+TEST(ExecFunc, Length) {
+	const auto p = TmpPath("fn_length");
+	WriteSampleFile(p, {1,2,3}, {0,0,0}, {"a","hello","xy"}, 4);
+
+	columnar::ColumnarReader rdr(p);
+	exec::Scan scan(rdr, std::vector<std::string>{"c"});
+
+	std::vector<exec::ExprPtr> args;
+	args.push_back(exec::MakeColumnByName(scan.OutputSchema(), "c"));
+
+	std::vector<std::pair<std::string, exec::ExprPtr>> outs;
+	outs.emplace_back("len", exec::MakeFuncCall("length", std::move(args)));
+	exec::Project proj(scan, std::move(outs));
+
+	auto eb = proj.Next();
+	ASSERT_TRUE(eb.has_value());
+	const auto &out = std::get<std::vector<std::int64_t>>(eb->batch->GetColumn(0));
+	EXPECT_EQ(out, (std::vector<std::int64_t>{1, 5, 2}));
+}
+
+TEST(ExecFunc, LikePrefix) {
+	const auto p = TmpPath("fn_like_prefix");
+	WriteSampleFile(p, {1,2,3,4}, {0,0,0,0},
+	                {"google.com", "yandex.ru", "google.co.uk", "ya.ru"}, 4);
+
+	columnar::ColumnarReader rdr(p);
+	exec::Scan scan(rdr, std::vector<std::string>{"c"});
+
+	std::vector<exec::ExprPtr> args;
+	args.push_back(exec::MakeColumnByName(scan.OutputSchema(), "c"));
+	args.push_back(exec::MakeConstStr("google%"));
+
+	auto pred = exec::MakeFuncCall("like", std::move(args));
+	exec::Filter filter(scan, std::move(pred));
+
+	std::size_t total = 0;
+	while (auto eb = filter.Next()) total += eb->size();
+	EXPECT_EQ(total, 2u);
+}
+
+TEST(ExecFunc, LikeContains) {
+	const auto p = TmpPath("fn_like_contains");
+	WriteSampleFile(p, {1,2,3,4}, {0,0,0,0},
+	                {"abcxyz", "abc", "xyz", "xabcx"}, 4);
+
+	columnar::ColumnarReader rdr(p);
+	exec::Scan scan(rdr, std::vector<std::string>{"c"});
+
+	std::vector<exec::ExprPtr> args;
+	args.push_back(exec::MakeColumnByName(scan.OutputSchema(), "c"));
+	args.push_back(exec::MakeConstStr("%abc%"));
+
+	auto pred = exec::MakeFuncCall("like", std::move(args));
+	exec::Filter filter(scan, std::move(pred));
+
+	std::size_t total = 0;
+	while (auto eb = filter.Next()) total += eb->size();
+	EXPECT_EQ(total, 3u);
+}
+
+TEST(ExecFunc, NotLike) {
+	const auto p = TmpPath("fn_not_like");
+	WriteSampleFile(p, {1,2,3}, {0,0,0}, {"abc", "xyz", "ab"}, 4);
+
+	columnar::ColumnarReader rdr(p);
+	exec::Scan scan(rdr, std::vector<std::string>{"c"});
+
+	std::vector<exec::ExprPtr> args;
+	args.push_back(exec::MakeColumnByName(scan.OutputSchema(), "c"));
+	args.push_back(exec::MakeConstStr("ab%"));
+	auto like_expr = exec::MakeFuncCall("like", std::move(args));
+
+	std::vector<exec::ExprPtr> not_args;
+	not_args.push_back(std::move(like_expr));
+	auto pred = exec::MakeLogical(exec::LogOp::Not, std::move(not_args));
+	exec::Filter filter(scan, std::move(pred));
+
+	std::size_t total = 0;
+	while (auto eb = filter.Next()) total += eb->size();
+	EXPECT_EQ(total, 1u);
+}
+
+TEST(ExecHaving, FilterAfterHashAggregate) {
+	const auto p = TmpPath("having");
+	WriteSampleFile(p, {1,1,1,2,2,3}, {0,0,0,0,0,0},
+	                {"a","a","a","b","b","c"}, 4);
+
+	columnar::ColumnarReader rdr(p);
+	exec::Scan scan(rdr);
+
+	std::vector<std::pair<std::string, exec::ExprPtr>> keys;
+	keys.emplace_back("a", exec::MakeColumnByName(scan.OutputSchema(), "a"));
+	std::vector<exec::GroupAggSpec> aggs;
+	aggs.push_back({"cnt", exec::GroupAggKind::CountStar, nullptr});
+
+	exec::HashAggregate ha(scan, std::move(keys), std::move(aggs));
+
+	auto pred = exec::MakeCompare(
+		exec::MakeColumnByName(ha.OutputSchema(), "cnt"),
+		exec::CmpOp::Gt, exec::MakeConstI64(2));
+	exec::Filter filter(ha, std::move(pred));
+
+	auto eb = filter.Next();
+	ASSERT_TRUE(eb.has_value());
+	EXPECT_EQ(eb->size(), 1u);
 }
 
 TEST(ExecQ0, CountStarSmall) {

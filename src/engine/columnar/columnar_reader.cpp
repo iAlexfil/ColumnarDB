@@ -108,7 +108,7 @@ namespace columnar {
 
 		for (const auto &rg: batches_) {
 			for (const auto &ch: rg.columns) {
-				if (ch.offset + ch.size > footer_offset_) {
+				if (ch.size > footer_offset_ || ch.offset > footer_offset_ - ch.size) {
 					throw std::runtime_error("invalid meta data in .columnar file");
 				}
 			}
@@ -178,53 +178,8 @@ namespace columnar {
 	}
 
 	Batch ColumnarReader::ReadBatch(std::size_t idx) {
-		const BatchMeta &rg = batches_[idx];
-		const std::size_t ncols = schema_.size();
-		const std::size_t nrows = rg.row_count;
-
-		Batch batch(schema_);
-		batch.Reserve(nrows);
-
-		for (std::size_t col = 0; col < ncols; ++col) {
-			const auto &cs = schema_[col];
-			const auto &ch = rg.columns[col];
-			utils::Seek(in_, ch.offset);
-
-			auto readFixed = [&]<class T>(std::vector<T> &vec) {
-				vec.resize(nrows);
-				if (nrows > 0) ReadBytes(in_, vec.data(), nrows * sizeof(T));
-			};
-
-			switch (cs.type) {
-				case DataType::Int8:     readFixed(std::get<std::vector<std::int8_t>>(batch.GetColumn(col))); break;
-				case DataType::Int16:    readFixed(std::get<std::vector<std::int16_t>>(batch.GetColumn(col))); break;
-				case DataType::Int32:    readFixed(std::get<std::vector<std::int32_t>>(batch.GetColumn(col))); break;
-				case DataType::Int64:    readFixed(std::get<std::vector<std::int64_t>>(batch.GetColumn(col))); break;
-				case DataType::UInt8:    readFixed(std::get<std::vector<std::uint8_t>>(batch.GetColumn(col))); break;
-				case DataType::UInt16:   readFixed(std::get<std::vector<std::uint16_t>>(batch.GetColumn(col))); break;
-				case DataType::UInt32:   readFixed(std::get<std::vector<std::uint32_t>>(batch.GetColumn(col))); break;
-				case DataType::UInt64:   readFixed(std::get<std::vector<std::uint64_t>>(batch.GetColumn(col))); break;
-				case DataType::Float32:  readFixed(std::get<std::vector<float>>(batch.GetColumn(col))); break;
-				case DataType::Float64:  readFixed(std::get<std::vector<double>>(batch.GetColumn(col))); break;
-				case DataType::Date:     readFixed(std::get<std::vector<std::int32_t>>(batch.GetColumn(col))); break;
-				case DataType::DateTime: readFixed(std::get<std::vector<std::int64_t>>(batch.GetColumn(col))); break;
-				case DataType::String: {
-					auto &vec = std::get<std::vector<std::string>>(batch.GetColumn(col));
-					vec.resize(nrows);
-					std::vector<std::uint32_t> lens(nrows);
-					if (nrows > 0) ReadBytes(in_, lens.data(), nrows * sizeof(std::uint32_t));
-					for (std::size_t i = 0; i < nrows; ++i) {
-						vec[i].resize(lens[i]);
-						if (lens[i] > 0) ReadBytes(in_, vec[i].data(), lens[i]);
-					}
-					break;
-				}
-				default:
-					throw std::runtime_error("columnar: unsupported DataType");
-			}
-		}
-
-		batch.SetRowCount(nrows);
-		return batch;
+		std::vector<std::size_t> all(schema_.size());
+		for (std::size_t i = 0; i < schema_.size(); ++i) all[i] = i;
+		return ReadBatchColumns(idx, all);
 	}
 }

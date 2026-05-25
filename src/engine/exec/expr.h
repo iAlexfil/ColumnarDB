@@ -62,6 +62,7 @@ ExprPtr MakeCompare(ExprPtr l, CmpOp op, ExprPtr r);
 ExprPtr MakeLogical(LogOp op, std::vector<ExprPtr> args);
 ExprPtr MakeArith(ExprPtr l, ArithOp op, ExprPtr r);
 ExprPtr MakeInList(ExprPtr lhs, std::vector<ExprPtr> consts);
+ExprPtr MakeIf(ExprPtr cond, ExprPtr if_true, ExprPtr if_false);
 
 std::size_t ColumnIndexByName(const Schema &s, std::string_view name);
 bool IsIntegerLike(EvalType t);

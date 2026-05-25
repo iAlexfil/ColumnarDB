@@ -73,6 +73,7 @@ target_link_libraries(columnar PUBLIC
 
 add_library(exec STATIC
         src/engine/exec/expr.cpp
+        src/engine/exec/func.cpp
         src/engine/exec/hash_aggregate.cpp
 )
 

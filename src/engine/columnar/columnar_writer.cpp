@@ -22,7 +22,9 @@ void WriteBytes(std::ofstream &out, const void *data, std::size_t size) {
 }
 
 std::uint64_t Position(std::ofstream &out) {
-	return out.tellp();
+	const std::streampos p = out.tellp();
+	if (p == std::streampos(-1)) throw std::runtime_error("tellp failed");
+	return static_cast<std::uint64_t>(p);
 }
 
 void WriteString(std::ofstream &out, const std::string &s) {
@@ -116,7 +118,6 @@ namespace columnar {
 	}
 
 	void ColumnarWriter::PatchFooterOffset(std::uint64_t footer_offset) {
-		// header: magic(4) + version(4) + footer_offset(8)
 		constexpr std::uint64_t footer_pos_in_header = 4 + 4;
 		const std::uint64_t cur = Position(out_);
 		utils::Seek(out_, footer_pos_in_header);
@@ -147,15 +148,11 @@ namespace columnar {
 		if (finalized_) return;
 		finalized_ = true;
 
-		out_.flush();
-
 		const std::uint64_t footer_offset = Position(out_);
 		WriteFooter(footer_offset);
-
-		out_.flush();
-
 		PatchFooterOffset(footer_offset);
 
 		out_.flush();
+		if (!out_) throw std::runtime_error("columnar: write failed during Finish");
 	}
 }

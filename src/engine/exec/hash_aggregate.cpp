@@ -167,56 +167,46 @@ public:
 	DataType OutputType() const override { return DataType::UInt64; }
 };
 
-std::unique_ptr<GroupAgg> BuildSumAgg(ExprPtr e) {
-	switch (e->result_type()) {
+template<class NumericFactory>
+std::unique_ptr<GroupAgg> BuildNumericAgg(EvalType t, NumericFactory factory, const char *name) {
+	switch (t) {
 		case EvalType::I64: case EvalType::Date: case EvalType::DateTime:
-			return std::make_unique<SumAgg<std::int64_t>>(std::move(e));
-		case EvalType::U64: return std::make_unique<SumAgg<std::uint64_t>>(std::move(e));
-		case EvalType::F64: return std::make_unique<SumAgg<double>>(std::move(e));
-		default: throw std::runtime_error("SUM: numeric input required");
-	}
-}
-
-std::unique_ptr<GroupAgg> BuildMinMaxAgg(ExprPtr e, bool is_min) {
-	switch (e->result_type()) {
-		case EvalType::I64: case EvalType::Date: case EvalType::DateTime:
-			return std::make_unique<MinMaxAgg<std::int64_t>>(std::move(e), is_min);
-		case EvalType::U64: return std::make_unique<MinMaxAgg<std::uint64_t>>(std::move(e), is_min);
-		case EvalType::F64: return std::make_unique<MinMaxAgg<double>>(std::move(e), is_min);
-		case EvalType::Str: return std::make_unique<MinMaxAgg<std::string>>(std::move(e), is_min);
-		default: throw std::runtime_error("MIN/MAX: unsupported type");
-	}
-}
-
-std::unique_ptr<GroupAgg> BuildAvgAgg(ExprPtr e) {
-	switch (e->result_type()) {
-		case EvalType::I64: case EvalType::Date: case EvalType::DateTime:
-			return std::make_unique<AvgAgg<std::int64_t>>(std::move(e));
-		case EvalType::U64: return std::make_unique<AvgAgg<std::uint64_t>>(std::move(e));
-		case EvalType::F64: return std::make_unique<AvgAgg<double>>(std::move(e));
-		default: throw std::runtime_error("AVG: numeric input required");
-	}
-}
-
-std::unique_ptr<GroupAgg> BuildCountDistinctAgg(ExprPtr e) {
-	switch (e->result_type()) {
-		case EvalType::I64: case EvalType::Date: case EvalType::DateTime:
-			return std::make_unique<CountDistinctAgg<std::int64_t>>(std::move(e));
-		case EvalType::U64: return std::make_unique<CountDistinctAgg<std::uint64_t>>(std::move(e));
-		case EvalType::F64: return std::make_unique<CountDistinctAgg<double>>(std::move(e));
-		case EvalType::Str: return std::make_unique<CountDistinctAgg<std::string>>(std::move(e));
-		default: throw std::runtime_error("COUNT DISTINCT: unsupported type");
+			return factory.template operator()<std::int64_t>();
+		case EvalType::U64: return factory.template operator()<std::uint64_t>();
+		case EvalType::F64: return factory.template operator()<double>();
+		default: throw std::runtime_error(std::string(name) + ": numeric input required");
 	}
 }
 
 std::unique_ptr<GroupAgg> BuildGroupAgg(GroupAggSpec &spec) {
+	if (spec.kind == GroupAggKind::CountStar) return std::make_unique<CountStarAgg>();
+	if (!spec.input) throw std::runtime_error("aggregate: input required");
+
+	auto e_type = spec.input->result_type();
+	auto e = std::move(spec.input);
+
 	switch (spec.kind) {
-		case GroupAggKind::CountStar: return std::make_unique<CountStarAgg>();
-		case GroupAggKind::Sum:       return BuildSumAgg(std::move(spec.input));
-		case GroupAggKind::Min:       return BuildMinMaxAgg(std::move(spec.input), true);
-		case GroupAggKind::Max:       return BuildMinMaxAgg(std::move(spec.input), false);
-		case GroupAggKind::Avg:       return BuildAvgAgg(std::move(spec.input));
-		case GroupAggKind::CountDistinct: return BuildCountDistinctAgg(std::move(spec.input));
+		case GroupAggKind::Sum:
+			return BuildNumericAgg(e_type,
+				[&]<class T>() { return std::make_unique<SumAgg<T>>(std::move(e)); }, "SUM");
+		case GroupAggKind::Avg:
+			return BuildNumericAgg(e_type,
+				[&]<class T>() { return std::make_unique<AvgAgg<T>>(std::move(e)); }, "AVG");
+		case GroupAggKind::Min: case GroupAggKind::Max: {
+			const bool is_min = (spec.kind == GroupAggKind::Min);
+			if (e_type == EvalType::Str)
+				return std::make_unique<MinMaxAgg<std::string>>(std::move(e), is_min);
+			return BuildNumericAgg(e_type,
+				[&]<class T>() { return std::make_unique<MinMaxAgg<T>>(std::move(e), is_min); },
+				is_min ? "MIN" : "MAX");
+		}
+		case GroupAggKind::CountDistinct:
+			if (e_type == EvalType::Str)
+				return std::make_unique<CountDistinctAgg<std::string>>(std::move(e));
+			return BuildNumericAgg(e_type,
+				[&]<class T>() { return std::make_unique<CountDistinctAgg<T>>(std::move(e)); },
+				"COUNT DISTINCT");
+		case GroupAggKind::CountStar: break;
 	}
 	throw std::runtime_error("BuildGroupAgg: unsupported kind");
 }
