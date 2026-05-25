@@ -11,6 +11,7 @@
 #include "columnar_reader.h"
 #include "columnar_writer.h"
 #include "expr.h"
+#include "filter.h"
 #include "hash_aggregate.h"
 #include "project.h"
 #include "scan.h"
@@ -165,6 +166,102 @@ TEST(ExecQ0, CountStarEmptyFile) {
 	auto eb = ha.Next();
 	ASSERT_TRUE(eb.has_value());
 	EXPECT_EQ(eb->batch->RowCount(), 0u);
+}
+
+TEST(ExecFilter, IntCompareNe) {
+	const auto p = TmpPath("filter_ne");
+	WriteSampleFile(p, {0, 1, 0, 2, 0, 3}, {0,0,0,0,0,0}, {"","","","","",""}, 3);
+
+	columnar::ColumnarReader rdr(p);
+	exec::Scan scan(rdr, std::vector<std::string>{"a"});
+
+	auto pred = exec::MakeCompare(
+		exec::MakeColumnByName(scan.OutputSchema(), "a"),
+		exec::CmpOp::Ne,
+		exec::MakeConstI64(0));
+	exec::Filter filter(scan, std::move(pred));
+
+	std::size_t total = 0;
+	while (auto eb = filter.Next()) total += eb->size();
+	EXPECT_EQ(total, 3u);
+}
+
+TEST(ExecFilter, AllFilteredOut) {
+	const auto p = TmpPath("filter_empty");
+	WriteSampleFile(p, {0, 0, 0}, {0,0,0}, {"","",""}, 4);
+
+	columnar::ColumnarReader rdr(p);
+	exec::Scan scan(rdr, std::vector<std::string>{"a"});
+
+	auto pred = exec::MakeCompare(
+		exec::MakeColumnByName(scan.OutputSchema(), "a"),
+		exec::CmpOp::Gt,
+		exec::MakeConstI64(100));
+	exec::Filter filter(scan, std::move(pred));
+
+	EXPECT_FALSE(filter.Next().has_value());
+}
+
+TEST(ExecAgg, SumMinMaxAvgDistinct) {
+	const auto p = TmpPath("agg_all");
+	WriteSampleFile(p, {1,2,3,4,5}, {10,20,30,40,50}, {"x","y","x","y","z"}, 2);
+
+	columnar::ColumnarReader rdr(p);
+	exec::Scan scan(rdr);
+
+	std::vector<std::pair<std::string, exec::ExprPtr>> keys;
+	keys.emplace_back("__zero", exec::MakeConstI64(0));
+
+	std::vector<exec::GroupAggSpec> aggs;
+	aggs.push_back({"sum_b", exec::GroupAggKind::Sum,
+		exec::MakeColumnByName(scan.OutputSchema(), "b")});
+	aggs.push_back({"min_a", exec::GroupAggKind::Min,
+		exec::MakeColumnByName(scan.OutputSchema(), "a")});
+	aggs.push_back({"max_a", exec::GroupAggKind::Max,
+		exec::MakeColumnByName(scan.OutputSchema(), "a")});
+	aggs.push_back({"avg_b", exec::GroupAggKind::Avg,
+		exec::MakeColumnByName(scan.OutputSchema(), "b")});
+	aggs.push_back({"dist_c", exec::GroupAggKind::CountDistinct,
+		exec::MakeColumnByName(scan.OutputSchema(), "c")});
+
+	exec::HashAggregate ha(scan, std::move(keys), std::move(aggs));
+	auto eb = ha.Next();
+	ASSERT_TRUE(eb.has_value());
+	ASSERT_EQ(eb->batch->RowCount(), 1u);
+
+	EXPECT_EQ(std::get<std::vector<std::int64_t>>(eb->batch->GetColumn(1))[0], 150);
+	EXPECT_EQ(std::get<std::vector<std::int64_t>>(eb->batch->GetColumn(2))[0], 1);
+	EXPECT_EQ(std::get<std::vector<std::int64_t>>(eb->batch->GetColumn(3))[0], 5);
+	EXPECT_DOUBLE_EQ(std::get<std::vector<double>>(eb->batch->GetColumn(4))[0], 30.0);
+	EXPECT_EQ(std::get<std::vector<std::uint64_t>>(eb->batch->GetColumn(5))[0], 3u);
+}
+
+TEST(ExecAgg, FilterThenCount) {
+	const auto p = TmpPath("filter_count");
+	WriteSampleFile(p, {0,1,0,2,0,3}, {10,20,30,40,50,60}, {"","","","","",""}, 3);
+
+	columnar::ColumnarReader rdr(p);
+	exec::Scan scan(rdr, std::vector<std::string>{"a"});
+
+	auto pred = exec::MakeCompare(
+		exec::MakeColumnByName(scan.OutputSchema(), "a"),
+		exec::CmpOp::Ne, exec::MakeConstI64(0));
+	exec::Filter filter(scan, std::move(pred));
+
+	std::vector<std::pair<std::string, exec::ExprPtr>> keys;
+	keys.emplace_back("__zero", exec::MakeConstI64(0));
+	std::vector<exec::GroupAggSpec> aggs;
+	aggs.push_back({"count", exec::GroupAggKind::CountStar, nullptr});
+
+	exec::HashAggregate ha(filter, std::move(keys), std::move(aggs));
+
+	std::vector<std::pair<std::string, exec::ExprPtr>> outs;
+	outs.emplace_back("count", exec::MakeColumnByName(ha.OutputSchema(), "count"));
+	exec::Project proj(ha, std::move(outs));
+
+	auto eb = proj.Next();
+	ASSERT_TRUE(eb.has_value());
+	EXPECT_EQ(std::get<std::vector<std::uint64_t>>(eb->batch->GetColumn(0))[0], 3u);
 }
 
 TEST(ExecQ0, CountStarMultiBatch) {

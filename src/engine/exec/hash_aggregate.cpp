@@ -5,6 +5,7 @@
 #include <stdexcept>
 #include <type_traits>
 #include <unordered_map>
+#include <unordered_set>
 #include <variant>
 
 namespace exec {
@@ -70,10 +71,152 @@ public:
 	DataType OutputType() const override { return DataType::UInt64; }
 };
 
+template<class T>
+class SumAgg : public GroupAgg {
+	ExprPtr expr_;
+	using Acc = std::conditional_t<std::is_floating_point_v<T>, double,
+	            std::conditional_t<std::is_signed_v<T>, std::int64_t, std::uint64_t>>;
+	std::vector<Acc> sums_;
+public:
+	explicit SumAgg(ExprPtr e) : expr_(std::move(e)) {}
+	void EnsureGroups(std::size_t n) override { sums_.resize(n, 0); }
+	void UpdateBatch(const std::vector<std::uint32_t> &gids, const EvalContext &ctx) override {
+		auto col = expr_->eval(ctx);
+		const auto &v = std::get<std::vector<T>>(col);
+		for (std::size_t i = 0; i < gids.size(); ++i) sums_[gids[i]] += static_cast<Acc>(v[i]);
+	}
+	void EmitInto(DataVector &slot) override { slot.emplace<std::vector<Acc>>(std::move(sums_)); }
+	DataType OutputType() const override {
+		if constexpr (std::is_floating_point_v<T>) return DataType::Float64;
+		else if constexpr (std::is_signed_v<T>) return DataType::Int64;
+		else return DataType::UInt64;
+	}
+};
+
+template<class T>
+class MinMaxAgg : public GroupAgg {
+	ExprPtr expr_;
+	bool is_min_;
+	std::vector<T> values_;
+	std::vector<std::uint8_t> has_;
+public:
+	MinMaxAgg(ExprPtr e, bool is_min) : expr_(std::move(e)), is_min_(is_min) {}
+	void EnsureGroups(std::size_t n) override { values_.resize(n, T{}); has_.resize(n, 0); }
+	void UpdateBatch(const std::vector<std::uint32_t> &gids, const EvalContext &ctx) override {
+		auto col = expr_->eval(ctx);
+		const auto &v = std::get<std::vector<T>>(col);
+		for (std::size_t i = 0; i < gids.size(); ++i) {
+			auto g = gids[i];
+			if (!has_[g]) { values_[g] = v[i]; has_[g] = 1; continue; }
+			if (is_min_ ? (v[i] < values_[g]) : (v[i] > values_[g])) values_[g] = v[i];
+		}
+	}
+	void EmitInto(DataVector &slot) override { slot.emplace<std::vector<T>>(std::move(values_)); }
+	DataType OutputType() const override {
+		if constexpr (std::is_same_v<T, std::int64_t>)  return DataType::Int64;
+		if constexpr (std::is_same_v<T, std::uint64_t>) return DataType::UInt64;
+		if constexpr (std::is_same_v<T, double>)        return DataType::Float64;
+		if constexpr (std::is_same_v<T, std::string>)   return DataType::String;
+		throw std::runtime_error("MinMaxAgg: unsupported type");
+	}
+};
+
+template<class T>
+class AvgAgg : public GroupAgg {
+	ExprPtr expr_;
+	std::vector<double> sums_;
+	std::vector<std::uint64_t> counts_;
+public:
+	explicit AvgAgg(ExprPtr e) : expr_(std::move(e)) {}
+	void EnsureGroups(std::size_t n) override { sums_.resize(n, 0); counts_.resize(n, 0); }
+	void UpdateBatch(const std::vector<std::uint32_t> &gids, const EvalContext &ctx) override {
+		auto col = expr_->eval(ctx);
+		const auto &v = std::get<std::vector<T>>(col);
+		for (std::size_t i = 0; i < gids.size(); ++i) {
+			sums_[gids[i]] += static_cast<double>(v[i]);
+			++counts_[gids[i]];
+		}
+	}
+	void EmitInto(DataVector &slot) override {
+		std::vector<double> out(sums_.size());
+		for (std::size_t i = 0; i < sums_.size(); ++i) {
+			out[i] = counts_[i] > 0 ? sums_[i] / static_cast<double>(counts_[i]) : 0.0;
+		}
+		slot.emplace<std::vector<double>>(std::move(out));
+	}
+	DataType OutputType() const override { return DataType::Float64; }
+};
+
+template<class T>
+class CountDistinctAgg : public GroupAgg {
+	ExprPtr expr_;
+	std::vector<std::unordered_set<T>> sets_;
+public:
+	explicit CountDistinctAgg(ExprPtr e) : expr_(std::move(e)) {}
+	void EnsureGroups(std::size_t n) override { sets_.resize(n); }
+	void UpdateBatch(const std::vector<std::uint32_t> &gids, const EvalContext &ctx) override {
+		auto col = expr_->eval(ctx);
+		const auto &v = std::get<std::vector<T>>(col);
+		for (std::size_t i = 0; i < gids.size(); ++i) sets_[gids[i]].insert(v[i]);
+	}
+	void EmitInto(DataVector &slot) override {
+		std::vector<std::uint64_t> out(sets_.size());
+		for (std::size_t i = 0; i < sets_.size(); ++i) out[i] = sets_[i].size();
+		slot.emplace<std::vector<std::uint64_t>>(std::move(out));
+	}
+	DataType OutputType() const override { return DataType::UInt64; }
+};
+
+std::unique_ptr<GroupAgg> BuildSumAgg(ExprPtr e) {
+	switch (e->result_type()) {
+		case EvalType::I64: case EvalType::Date: case EvalType::DateTime:
+			return std::make_unique<SumAgg<std::int64_t>>(std::move(e));
+		case EvalType::U64: return std::make_unique<SumAgg<std::uint64_t>>(std::move(e));
+		case EvalType::F64: return std::make_unique<SumAgg<double>>(std::move(e));
+		default: throw std::runtime_error("SUM: numeric input required");
+	}
+}
+
+std::unique_ptr<GroupAgg> BuildMinMaxAgg(ExprPtr e, bool is_min) {
+	switch (e->result_type()) {
+		case EvalType::I64: case EvalType::Date: case EvalType::DateTime:
+			return std::make_unique<MinMaxAgg<std::int64_t>>(std::move(e), is_min);
+		case EvalType::U64: return std::make_unique<MinMaxAgg<std::uint64_t>>(std::move(e), is_min);
+		case EvalType::F64: return std::make_unique<MinMaxAgg<double>>(std::move(e), is_min);
+		case EvalType::Str: return std::make_unique<MinMaxAgg<std::string>>(std::move(e), is_min);
+		default: throw std::runtime_error("MIN/MAX: unsupported type");
+	}
+}
+
+std::unique_ptr<GroupAgg> BuildAvgAgg(ExprPtr e) {
+	switch (e->result_type()) {
+		case EvalType::I64: case EvalType::Date: case EvalType::DateTime:
+			return std::make_unique<AvgAgg<std::int64_t>>(std::move(e));
+		case EvalType::U64: return std::make_unique<AvgAgg<std::uint64_t>>(std::move(e));
+		case EvalType::F64: return std::make_unique<AvgAgg<double>>(std::move(e));
+		default: throw std::runtime_error("AVG: numeric input required");
+	}
+}
+
+std::unique_ptr<GroupAgg> BuildCountDistinctAgg(ExprPtr e) {
+	switch (e->result_type()) {
+		case EvalType::I64: case EvalType::Date: case EvalType::DateTime:
+			return std::make_unique<CountDistinctAgg<std::int64_t>>(std::move(e));
+		case EvalType::U64: return std::make_unique<CountDistinctAgg<std::uint64_t>>(std::move(e));
+		case EvalType::F64: return std::make_unique<CountDistinctAgg<double>>(std::move(e));
+		case EvalType::Str: return std::make_unique<CountDistinctAgg<std::string>>(std::move(e));
+		default: throw std::runtime_error("COUNT DISTINCT: unsupported type");
+	}
+}
+
 std::unique_ptr<GroupAgg> BuildGroupAgg(GroupAggSpec &spec) {
 	switch (spec.kind) {
-		case GroupAggKind::CountStar:
-			return std::make_unique<CountStarAgg>();
+		case GroupAggKind::CountStar: return std::make_unique<CountStarAgg>();
+		case GroupAggKind::Sum:       return BuildSumAgg(std::move(spec.input));
+		case GroupAggKind::Min:       return BuildMinMaxAgg(std::move(spec.input), true);
+		case GroupAggKind::Max:       return BuildMinMaxAgg(std::move(spec.input), false);
+		case GroupAggKind::Avg:       return BuildAvgAgg(std::move(spec.input));
+		case GroupAggKind::CountDistinct: return BuildCountDistinctAgg(std::move(spec.input));
 	}
 	throw std::runtime_error("BuildGroupAgg: unsupported kind");
 }

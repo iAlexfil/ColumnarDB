@@ -12,7 +12,7 @@
 
 namespace exec {
 
-enum class GroupAggKind { CountStar };
+enum class GroupAggKind { CountStar, Sum, Min, Max, Avg, CountDistinct };
 
 struct GroupAggSpec {
 	std::string name;

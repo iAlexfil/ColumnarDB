@@ -125,6 +125,95 @@ private:
 	EvalType t_;
 };
 
+EvalType CommonNumericType(EvalType a, EvalType b) {
+	if (a == EvalType::F64 || b == EvalType::F64) return EvalType::F64;
+	if (a == b) return a;
+	if (IsIntegerLike(a) && IsIntegerLike(b)) return EvalType::I64;
+	if (a == EvalType::U64 && IsIntegerLike(b)) return EvalType::F64;
+	if (b == EvalType::U64 && IsIntegerLike(a)) return EvalType::F64;
+	throw std::runtime_error("expr: incompatible numeric types");
+}
+
+template<class T>
+std::vector<T> CastEval(const EvalCol &c) {
+	return std::visit([](const auto &v) -> std::vector<T> {
+		using S = typename std::decay_t<decltype(v)>::value_type;
+		if constexpr (std::is_arithmetic_v<S>) {
+			std::vector<T> out(v.size());
+			for (std::size_t i = 0; i < v.size(); ++i) out[i] = static_cast<T>(v[i]);
+			return out;
+		} else {
+			throw std::runtime_error("expr: cast non-numeric to numeric");
+		}
+	}, c);
+}
+
+template<class T, class Cmp>
+std::vector<std::uint8_t> CmpLoop(const std::vector<T> &l, const std::vector<T> &r, Cmp cmp) {
+	std::vector<std::uint8_t> out(l.size());
+	for (std::size_t i = 0; i < l.size(); ++i) out[i] = cmp(l[i], r[i]) ? 1 : 0;
+	return out;
+}
+
+template<class T>
+std::vector<std::uint8_t> DispatchCmp(CmpOp op, const std::vector<T> &l, const std::vector<T> &r) {
+	switch (op) {
+		case CmpOp::Eq: return CmpLoop(l, r, [](const T &a, const T &b) { return a == b; });
+		case CmpOp::Ne: return CmpLoop(l, r, [](const T &a, const T &b) { return a != b; });
+		case CmpOp::Lt: return CmpLoop(l, r, [](const T &a, const T &b) { return a <  b; });
+		case CmpOp::Le: return CmpLoop(l, r, [](const T &a, const T &b) { return a <= b; });
+		case CmpOp::Gt: return CmpLoop(l, r, [](const T &a, const T &b) { return a >  b; });
+		case CmpOp::Ge: return CmpLoop(l, r, [](const T &a, const T &b) { return a >= b; });
+	}
+	throw std::runtime_error("DispatchCmp: bad op");
+}
+
+class CompareExpr final : public Expr {
+public:
+	CompareExpr(ExprPtr l, CmpOp op, ExprPtr r) : l_(std::move(l)), op_(op), r_(std::move(r)) {
+		if (l_->result_type() == EvalType::Str && r_->result_type() == EvalType::Str) {
+			str_ = true;
+		} else {
+			str_ = false;
+			common_ = CommonNumericType(l_->result_type(), r_->result_type());
+		}
+	}
+
+	EvalType result_type() const override { return EvalType::Bool; }
+
+	EvalCol eval(const EvalContext &ctx) const override {
+		EvalCol lc = l_->eval(ctx);
+		EvalCol rc = r_->eval(ctx);
+		if (str_) {
+			return DispatchCmp(op_,
+				std::get<std::vector<std::string>>(lc),
+				std::get<std::vector<std::string>>(rc));
+		}
+		switch (common_) {
+			case EvalType::I64:
+			case EvalType::Date:
+			case EvalType::DateTime:
+				return DispatchCmp(op_, CastEval<std::int64_t>(lc), CastEval<std::int64_t>(rc));
+			case EvalType::U64:
+				return DispatchCmp(op_, CastEval<std::uint64_t>(lc), CastEval<std::uint64_t>(rc));
+			case EvalType::F64:
+				return DispatchCmp(op_, CastEval<double>(lc), CastEval<double>(rc));
+			default:
+				throw std::runtime_error("CompareExpr: bad common type");
+		}
+	}
+
+private:
+	ExprPtr l_, r_;
+	CmpOp op_;
+	bool str_ = false;
+	EvalType common_ = EvalType::I64;
+};
+
+}
+
+bool IsIntegerLike(EvalType t) {
+	return t == EvalType::I64 || t == EvalType::Date || t == EvalType::DateTime;
 }
 
 ExprPtr MakeColumn(const Schema &s, std::size_t idx) {
@@ -138,6 +227,30 @@ ExprPtr MakeColumnByName(const Schema &s, std::string_view name) {
 
 ExprPtr MakeConstI64(std::int64_t v) {
 	return std::make_unique<ConstExpr<std::int64_t>>(v, EvalType::I64);
+}
+
+ExprPtr MakeConstU64(std::uint64_t v) {
+	return std::make_unique<ConstExpr<std::uint64_t>>(v, EvalType::U64);
+}
+
+ExprPtr MakeConstF64(double v) {
+	return std::make_unique<ConstExpr<double>>(v, EvalType::F64);
+}
+
+ExprPtr MakeConstStr(std::string v) {
+	return std::make_unique<ConstExpr<std::string>>(std::move(v), EvalType::Str);
+}
+
+ExprPtr MakeConstDate(std::int64_t days) {
+	return std::make_unique<ConstExpr<std::int64_t>>(days, EvalType::Date);
+}
+
+ExprPtr MakeConstDateTime(std::int64_t seconds) {
+	return std::make_unique<ConstExpr<std::int64_t>>(seconds, EvalType::DateTime);
+}
+
+ExprPtr MakeCompare(ExprPtr l, CmpOp op, ExprPtr r) {
+	return std::make_unique<CompareExpr>(std::move(l), op, std::move(r));
 }
 
 }
