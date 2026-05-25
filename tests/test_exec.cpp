@@ -2,8 +2,10 @@
 
 #include <cstdint>
 #include <filesystem>
+#include <map>
 #include <memory>
 #include <string>
+#include <utility>
 #include <variant>
 #include <vector>
 
@@ -15,6 +17,8 @@
 #include "hash_aggregate.h"
 #include "project.h"
 #include "scan.h"
+#include "sort.h"
+#include "topk.h"
 #include "schema.h"
 #include "utils/utils.h"
 
@@ -112,6 +116,361 @@ TEST(ExecScan, EmptyProjectionGivesRowCountOnly) {
 		total += eb->batch->RowCount();
 	}
 	EXPECT_EQ(total, 7u);
+}
+
+TEST(ExecSort, SingleKeyAsc) {
+	const auto p = TmpPath("sort_asc");
+	WriteSampleFile(p, {5, 2, 4, 1, 3}, {50, 20, 40, 10, 30}, {"e","b","d","a","c"}, 3);
+
+	columnar::ColumnarReader rdr(p);
+	exec::Scan scan(rdr);
+
+	std::vector<std::pair<exec::ExprPtr, bool>> keys;
+	keys.emplace_back(exec::MakeColumnByName(scan.OutputSchema(), "a"), true);
+	exec::Sort sort(scan, std::move(keys));
+
+	auto eb = sort.Next();
+	ASSERT_TRUE(eb.has_value());
+	const auto &col = std::get<std::vector<std::int32_t>>(eb->batch->GetColumn(0));
+	EXPECT_EQ(col, (std::vector<std::int32_t>{1, 2, 3, 4, 5}));
+}
+
+TEST(ExecSort, DescWithLimit) {
+	const auto p = TmpPath("sort_desc_limit");
+	WriteSampleFile(p, {5, 2, 4, 1, 3}, {0,0,0,0,0}, {"","","","",""}, 3);
+
+	columnar::ColumnarReader rdr(p);
+	exec::Scan scan(rdr);
+
+	std::vector<std::pair<exec::ExprPtr, bool>> keys;
+	keys.emplace_back(exec::MakeColumnByName(scan.OutputSchema(), "a"), false);
+	exec::Sort sort(scan, std::move(keys), 3);
+
+	auto eb = sort.Next();
+	ASSERT_TRUE(eb.has_value());
+	ASSERT_EQ(eb->batch->RowCount(), 3u);
+	const auto &col = std::get<std::vector<std::int32_t>>(eb->batch->GetColumn(0));
+	EXPECT_EQ(col, (std::vector<std::int32_t>{5, 4, 3}));
+}
+
+TEST(ExecTopK, Basic) {
+	const auto p = TmpPath("topk_basic");
+	WriteSampleFile(p, {5, 2, 8, 1, 3, 7, 4}, {50,20,80,10,30,70,40},
+	                {"a","b","c","d","e","f","g"}, 3);
+
+	columnar::ColumnarReader rdr(p);
+	exec::Scan scan(rdr);
+
+	std::vector<std::pair<exec::ExprPtr, bool>> keys;
+	keys.emplace_back(exec::MakeColumnByName(scan.OutputSchema(), "a"), true);
+	exec::TopK top(scan, std::move(keys), 3);
+
+	auto eb = top.Next();
+	ASSERT_TRUE(eb.has_value());
+	ASSERT_EQ(eb->batch->RowCount(), 3u);
+	const auto &col = std::get<std::vector<std::int32_t>>(eb->batch->GetColumn(0));
+	EXPECT_EQ(col, (std::vector<std::int32_t>{1, 2, 3}));
+}
+
+TEST(ExecTopK, AfterGroupBy) {
+	const auto p = TmpPath("topk_groupby");
+	WriteSampleFile(p,
+		{1,1,1,2,2,3},
+		{0,0,0,0,0,0},
+		{"a","a","a","b","b","c"}, 4);
+
+	columnar::ColumnarReader rdr(p);
+	exec::Scan scan(rdr);
+
+	std::vector<std::pair<std::string, exec::ExprPtr>> ha_keys;
+	ha_keys.emplace_back("a", exec::MakeColumnByName(scan.OutputSchema(), "a"));
+	std::vector<exec::GroupAggSpec> aggs;
+	aggs.push_back({"cnt", exec::GroupAggKind::CountStar, nullptr});
+	exec::HashAggregate ha(scan, std::move(ha_keys), std::move(aggs));
+
+	std::vector<std::pair<exec::ExprPtr, bool>> sk;
+	sk.emplace_back(exec::MakeColumnByName(ha.OutputSchema(), "cnt"), false);
+	exec::TopK top(ha, std::move(sk), 2);
+
+	auto eb = top.Next();
+	ASSERT_TRUE(eb.has_value());
+	ASSERT_EQ(eb->batch->RowCount(), 2u);
+	const auto &keys = std::get<std::vector<std::int64_t>>(eb->batch->GetColumn(0));
+	const auto &cnts = std::get<std::vector<std::uint64_t>>(eb->batch->GetColumn(1));
+	EXPECT_EQ(keys, (std::vector<std::int64_t>{1, 2}));
+	EXPECT_EQ(cnts, (std::vector<std::uint64_t>{3, 2}));
+}
+
+TEST(ExecScan, ProjectionByIndex) {
+	const auto p = TmpPath("scan_proj_idx");
+	WriteSampleFile(p, {1,2,3}, {10,20,30}, {"a","b","c"}, 4);
+
+	columnar::ColumnarReader rdr(p);
+	exec::Scan scan(rdr, std::vector<std::size_t>{2, 0});
+
+	ASSERT_EQ(scan.OutputSchema().size(), 2u);
+	EXPECT_EQ(scan.OutputSchema()[0].name, "c");
+	EXPECT_EQ(scan.OutputSchema()[1].name, "a");
+
+	auto eb = scan.Next();
+	ASSERT_TRUE(eb.has_value());
+	EXPECT_EQ(eb->batch->ColCount(), 2u);
+	const auto &c = std::get<std::vector<std::string>>(eb->batch->GetColumn(0));
+	const auto &a = std::get<std::vector<std::int32_t>>(eb->batch->GetColumn(1));
+	EXPECT_EQ(c, (std::vector<std::string>{"a","b","c"}));
+	EXPECT_EQ(a, (std::vector<std::int32_t>{1,2,3}));
+}
+
+TEST(ExecFilter, CompareEq) {
+	const auto p = TmpPath("filter_eq");
+	WriteSampleFile(p, {1, 2, 3, 2, 1}, {0,0,0,0,0}, {"","","","",""}, 3);
+
+	columnar::ColumnarReader rdr(p);
+	exec::Scan scan(rdr, std::vector<std::string>{"a"});
+
+	auto pred = exec::MakeCompare(
+		exec::MakeColumnByName(scan.OutputSchema(), "a"),
+		exec::CmpOp::Eq,
+		exec::MakeConstI64(2));
+	exec::Filter filter(scan, std::move(pred));
+
+	std::size_t total = 0;
+	while (auto eb = filter.Next()) total += eb->size();
+	EXPECT_EQ(total, 2u);
+}
+
+TEST(ExecFilter, CompareGt) {
+	const auto p = TmpPath("filter_gt");
+	WriteSampleFile(p, {1, 5, 3, 7, 2}, {0,0,0,0,0}, {"","","","",""}, 3);
+
+	columnar::ColumnarReader rdr(p);
+	exec::Scan scan(rdr, std::vector<std::string>{"a"});
+
+	auto pred = exec::MakeCompare(
+		exec::MakeColumnByName(scan.OutputSchema(), "a"),
+		exec::CmpOp::Gt,
+		exec::MakeConstI64(3));
+	exec::Filter filter(scan, std::move(pred));
+
+	std::size_t total = 0;
+	while (auto eb = filter.Next()) total += eb->size();
+	EXPECT_EQ(total, 2u);
+}
+
+TEST(ExecFilter, StringCompare) {
+	const auto p = TmpPath("filter_str");
+	WriteSampleFile(p, {1,2,3,4}, {0,0,0,0}, {"x","y","x","z"}, 4);
+
+	columnar::ColumnarReader rdr(p);
+	exec::Scan scan(rdr, std::vector<std::string>{"c"});
+
+	auto pred = exec::MakeCompare(
+		exec::MakeColumnByName(scan.OutputSchema(), "c"),
+		exec::CmpOp::Eq,
+		exec::MakeConstStr("x"));
+	exec::Filter filter(scan, std::move(pred));
+
+	std::size_t total = 0;
+	while (auto eb = filter.Next()) total += eb->size();
+	EXPECT_EQ(total, 2u);
+}
+
+TEST(ExecFilter, ChainedFilters) {
+	const auto p = TmpPath("filter_chain");
+	WriteSampleFile(p, {1,2,3,4,5,6}, {10,20,30,40,50,60}, {"","","","","",""}, 3);
+
+	columnar::ColumnarReader rdr(p);
+	exec::Scan scan(rdr, std::vector<std::string>{"a", "b"});
+
+	auto p1 = exec::MakeCompare(
+		exec::MakeColumnByName(scan.OutputSchema(), "a"),
+		exec::CmpOp::Gt, exec::MakeConstI64(2));
+	exec::Filter f1(scan, std::move(p1));
+
+	auto p2 = exec::MakeCompare(
+		exec::MakeColumnByName(f1.OutputSchema(), "b"),
+		exec::CmpOp::Le, exec::MakeConstI64(50));
+	exec::Filter f2(f1, std::move(p2));
+
+	std::size_t total = 0;
+	while (auto eb = f2.Next()) total += eb->size();
+	EXPECT_EQ(total, 3u);
+}
+
+TEST(ExecSort, MultiKeyDescAsc) {
+	const auto p = TmpPath("sort_multi");
+	WriteSampleFile(p, {1, 2, 1, 2, 1}, {30, 10, 10, 30, 20},
+	                {"a","b","c","d","e"}, 3);
+
+	columnar::ColumnarReader rdr(p);
+	exec::Scan scan(rdr);
+
+	std::vector<std::pair<exec::ExprPtr, bool>> keys;
+	keys.emplace_back(exec::MakeColumnByName(scan.OutputSchema(), "a"), false);
+	keys.emplace_back(exec::MakeColumnByName(scan.OutputSchema(), "b"), true);
+	exec::Sort sort(scan, std::move(keys));
+
+	auto eb = sort.Next();
+	ASSERT_TRUE(eb.has_value());
+	const auto &a = std::get<std::vector<std::int32_t>>(eb->batch->GetColumn(0));
+	const auto &b = std::get<std::vector<std::int64_t>>(eb->batch->GetColumn(1));
+	EXPECT_EQ(a, (std::vector<std::int32_t>{2, 2, 1, 1, 1}));
+	EXPECT_EQ(b, (std::vector<std::int64_t>{10, 30, 10, 20, 30}));
+}
+
+TEST(ExecSort, LimitAndOffset) {
+	const auto p = TmpPath("sort_limit_offset");
+	WriteSampleFile(p, {5,2,4,1,3,7,6}, {0,0,0,0,0,0,0},
+	                {"a","b","c","d","e","f","g"}, 4);
+
+	columnar::ColumnarReader rdr(p);
+	exec::Scan scan(rdr);
+
+	std::vector<std::pair<exec::ExprPtr, bool>> keys;
+	keys.emplace_back(exec::MakeColumnByName(scan.OutputSchema(), "a"), true);
+	exec::Sort sort(scan, std::move(keys), 3, 2);
+
+	auto eb = sort.Next();
+	ASSERT_TRUE(eb.has_value());
+	const auto &a = std::get<std::vector<std::int32_t>>(eb->batch->GetColumn(0));
+	EXPECT_EQ(a, (std::vector<std::int32_t>{3, 4, 5}));
+}
+
+TEST(ExecTopK, KGreaterThanInput) {
+	const auto p = TmpPath("topk_big_k");
+	WriteSampleFile(p, {3,1,2}, {0,0,0}, {"","",""}, 4);
+
+	columnar::ColumnarReader rdr(p);
+	exec::Scan scan(rdr);
+	std::vector<std::pair<exec::ExprPtr, bool>> keys;
+	keys.emplace_back(exec::MakeColumnByName(scan.OutputSchema(), "a"), true);
+	exec::TopK top(scan, std::move(keys), 100);
+
+	auto eb = top.Next();
+	ASSERT_TRUE(eb.has_value());
+	ASSERT_EQ(eb->batch->RowCount(), 3u);
+	const auto &a = std::get<std::vector<std::int32_t>>(eb->batch->GetColumn(0));
+	EXPECT_EQ(a, (std::vector<std::int32_t>{1, 2, 3}));
+}
+
+TEST(ExecTopK, DescendingMultiKey) {
+	const auto p = TmpPath("topk_desc_multi");
+	WriteSampleFile(p, {1,2,1,2,1,2}, {30,10,20,40,10,30},
+	                {"a","b","c","d","e","f"}, 4);
+
+	columnar::ColumnarReader rdr(p);
+	exec::Scan scan(rdr);
+
+	std::vector<std::pair<exec::ExprPtr, bool>> keys;
+	keys.emplace_back(exec::MakeColumnByName(scan.OutputSchema(), "a"), false);
+	keys.emplace_back(exec::MakeColumnByName(scan.OutputSchema(), "b"), true);
+	exec::TopK top(scan, std::move(keys), 3);
+
+	auto eb = top.Next();
+	ASSERT_TRUE(eb.has_value());
+	const auto &a = std::get<std::vector<std::int32_t>>(eb->batch->GetColumn(0));
+	const auto &b = std::get<std::vector<std::int64_t>>(eb->batch->GetColumn(1));
+	EXPECT_EQ(a, (std::vector<std::int32_t>{2, 2, 2}));
+	EXPECT_EQ(b, (std::vector<std::int64_t>{10, 30, 40}));
+}
+
+TEST(ExecAgg, GroupBySingleKey) {
+	const auto p = TmpPath("agg_groupby");
+	WriteSampleFile(p, {1, 2, 1, 2, 1}, {10, 20, 30, 40, 50},
+	                {"x","y","x","y","x"}, 2);
+
+	columnar::ColumnarReader rdr(p);
+	exec::Scan scan(rdr);
+
+	std::vector<std::pair<std::string, exec::ExprPtr>> ha_keys;
+	ha_keys.emplace_back("a", exec::MakeColumnByName(scan.OutputSchema(), "a"));
+	std::vector<exec::GroupAggSpec> aggs;
+	aggs.push_back({"cnt", exec::GroupAggKind::CountStar, nullptr});
+	aggs.push_back({"sum_b", exec::GroupAggKind::Sum,
+		exec::MakeColumnByName(scan.OutputSchema(), "b")});
+
+	exec::HashAggregate ha(scan, std::move(ha_keys), std::move(aggs));
+
+	auto eb = ha.Next();
+	ASSERT_TRUE(eb.has_value());
+	ASSERT_EQ(eb->batch->RowCount(), 2u);
+
+	const auto &k = std::get<std::vector<std::int64_t>>(eb->batch->GetColumn(0));
+	const auto &cnt = std::get<std::vector<std::uint64_t>>(eb->batch->GetColumn(1));
+	const auto &sm = std::get<std::vector<std::int64_t>>(eb->batch->GetColumn(2));
+
+	std::map<std::int64_t, std::pair<std::uint64_t, std::int64_t>> got;
+	for (std::size_t i = 0; i < k.size(); ++i) got[k[i]] = {cnt[i], sm[i]};
+
+	EXPECT_EQ(got[1].first, 3u);
+	EXPECT_EQ(got[1].second, 90);
+	EXPECT_EQ(got[2].first, 2u);
+	EXPECT_EQ(got[2].second, 60);
+}
+
+TEST(ExecAgg, GroupByMultiKey) {
+	const auto p = TmpPath("agg_multikey");
+	WriteSampleFile(p, {1, 2, 1, 2}, {0, 0, 0, 0},
+	                {"x","x","y","y"}, 2);
+
+	columnar::ColumnarReader rdr(p);
+	exec::Scan scan(rdr);
+
+	std::vector<std::pair<std::string, exec::ExprPtr>> ha_keys;
+	ha_keys.emplace_back("a", exec::MakeColumnByName(scan.OutputSchema(), "a"));
+	ha_keys.emplace_back("c", exec::MakeColumnByName(scan.OutputSchema(), "c"));
+	std::vector<exec::GroupAggSpec> aggs;
+	aggs.push_back({"cnt", exec::GroupAggKind::CountStar, nullptr});
+
+	exec::HashAggregate ha(scan, std::move(ha_keys), std::move(aggs));
+
+	auto eb = ha.Next();
+	ASSERT_TRUE(eb.has_value());
+	ASSERT_EQ(eb->batch->RowCount(), 4u);
+}
+
+TEST(ExecAgg, CountDistinctString) {
+	const auto p = TmpPath("agg_cd_str");
+	WriteSampleFile(p, {1,2,3,4,5,6}, {0,0,0,0,0,0},
+	                {"a","b","a","c","b","a"}, 3);
+
+	columnar::ColumnarReader rdr(p);
+	exec::Scan scan(rdr);
+
+	std::vector<std::pair<std::string, exec::ExprPtr>> keys;
+	keys.emplace_back("__zero", exec::MakeConstI64(0));
+	std::vector<exec::GroupAggSpec> aggs;
+	aggs.push_back({"dist", exec::GroupAggKind::CountDistinct,
+		exec::MakeColumnByName(scan.OutputSchema(), "c")});
+
+	exec::HashAggregate ha(scan, std::move(keys), std::move(aggs));
+	auto eb = ha.Next();
+	ASSERT_TRUE(eb.has_value());
+	EXPECT_EQ(std::get<std::vector<std::uint64_t>>(eb->batch->GetColumn(1))[0], 3u);
+}
+
+TEST(ExecProject, PassthroughAndConst) {
+	const auto p = TmpPath("proj_const");
+	WriteSampleFile(p, {10, 20, 30}, {0, 0, 0}, {"a","b","c"}, 4);
+
+	columnar::ColumnarReader rdr(p);
+	exec::Scan scan(rdr, std::vector<std::string>{"a"});
+
+	std::vector<std::pair<std::string, exec::ExprPtr>> outs;
+	outs.emplace_back("val", exec::MakeColumnByName(scan.OutputSchema(), "a"));
+	outs.emplace_back("one", exec::MakeConstI64(1));
+	exec::Project proj(scan, std::move(outs));
+
+	ASSERT_EQ(proj.OutputSchema().size(), 2u);
+	EXPECT_EQ(proj.OutputSchema()[0].name, "val");
+	EXPECT_EQ(proj.OutputSchema()[1].name, "one");
+
+	auto eb = proj.Next();
+	ASSERT_TRUE(eb.has_value());
+	const auto &val = std::get<std::vector<std::int64_t>>(eb->batch->GetColumn(0));
+	const auto &one = std::get<std::vector<std::int64_t>>(eb->batch->GetColumn(1));
+	EXPECT_EQ(val, (std::vector<std::int64_t>{10, 20, 30}));
+	EXPECT_EQ(one, (std::vector<std::int64_t>{1, 1, 1}));
 }
 
 TEST(ExecQ0, CountStarSmall) {

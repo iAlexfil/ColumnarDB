@@ -21,6 +21,8 @@
 #include "project.h"
 #include "scan.h"
 #include "schema.h"
+#include "sort.h"
+#include "topk.h"
 
 namespace fs = std::filesystem;
 
@@ -64,6 +66,14 @@ void AddProject(Plan &p, std::vector<KV> outs) {
 	AddOp(p, std::make_unique<exec::Project>(*p.root, std::move(outs)));
 }
 
+void AddSort(Plan &p, std::vector<std::pair<ExprPtr, bool>> keys) {
+	AddOp(p, std::make_unique<exec::Sort>(*p.root, std::move(keys)));
+}
+
+void AddTopK(Plan &p, std::vector<std::pair<ExprPtr, bool>> keys, std::size_t k) {
+	AddOp(p, std::make_unique<exec::TopK>(*p.root, std::move(keys), k));
+}
+
 ExprPtr C(const Plan &p, std::string_view name) {
 	return exec::MakeColumnByName(p.root->OutputSchema(), name);
 }
@@ -103,6 +113,15 @@ GroupAggSpec Distinct(std::string name, ExprPtr e) {
 
 ExprPtr Ne(ExprPtr a, ExprPtr b) { return exec::MakeCompare(std::move(a), exec::CmpOp::Ne, std::move(b)); }
 ExprPtr Eq(ExprPtr a, ExprPtr b) { return exec::MakeCompare(std::move(a), exec::CmpOp::Eq, std::move(b)); }
+
+using SK = std::pair<ExprPtr, bool>;
+
+template<class... Args>
+std::vector<SK> SortKeys(Args &&...args) {
+	std::vector<SK> v;
+	(v.push_back(std::forward<Args>(args)), ...);
+	return v;
+}
 
 // Q0: SELECT COUNT(*) FROM hits
 Plan Q0(columnar::ColumnarReader &rdr) {
@@ -183,6 +202,323 @@ Plan Q6(columnar::ColumnarReader &rdr) {
 	return p;
 }
 
+// Q7: SELECT AdvEngineID, COUNT(*) FROM hits WHERE AdvEngineID <> 0
+//     GROUP BY AdvEngineID ORDER BY COUNT(*) DESC
+Plan Q7(columnar::ColumnarReader &rdr) {
+	Plan p;
+	AddScan(p, rdr, {"AdvEngineID"});
+	AddFilter(p, Ne(C(p, "AdvEngineID"), exec::MakeConstI64(0)));
+	AddHashAgg(p,
+		Cols(KV{"AdvEngineID", C(p, "AdvEngineID")}),
+		Aggs(CountStar("count")));
+	AddSort(p, SortKeys(SK{C(p, "count"), false}));
+	AddProject(p, Cols(
+		KV{"AdvEngineID", C(p, "AdvEngineID")},
+		KV{"count", C(p, "count")}));
+	return p;
+}
+
+// Q8: SELECT RegionID, COUNT(DISTINCT UserID) AS u FROM hits
+//     GROUP BY RegionID ORDER BY u DESC LIMIT 10
+Plan Q8(columnar::ColumnarReader &rdr) {
+	Plan p;
+	AddScan(p, rdr, {"RegionID", "UserID"});
+	AddHashAgg(p,
+		Cols(KV{"RegionID", C(p, "RegionID")}),
+		Aggs(Distinct("u", C(p, "UserID"))));
+	AddTopK(p, SortKeys(SK{C(p, "u"), false}), 10);
+	AddProject(p, Cols(
+		KV{"RegionID", C(p, "RegionID")},
+		KV{"u", C(p, "u")}));
+	return p;
+}
+
+// Q9: SELECT RegionID, SUM(AdvEngineID), COUNT(*) AS c, AVG(ResolutionWidth),
+//     COUNT(DISTINCT UserID) FROM hits GROUP BY RegionID ORDER BY c DESC LIMIT 10
+Plan Q9(columnar::ColumnarReader &rdr) {
+	Plan p;
+	AddScan(p, rdr, {"RegionID", "AdvEngineID", "ResolutionWidth", "UserID"});
+	AddHashAgg(p,
+		Cols(KV{"RegionID", C(p, "RegionID")}),
+		Aggs(
+			Sum("sum_adv", C(p, "AdvEngineID")),
+			CountStar("c"),
+			Avg("avg_res", C(p, "ResolutionWidth")),
+			Distinct("distinct_u", C(p, "UserID"))));
+	AddTopK(p, SortKeys(SK{C(p, "c"), false}), 10);
+	AddProject(p, Cols(
+		KV{"RegionID", C(p, "RegionID")},
+		KV{"sum_adv", C(p, "sum_adv")},
+		KV{"c", C(p, "c")},
+		KV{"avg_res", C(p, "avg_res")},
+		KV{"distinct_u", C(p, "distinct_u")}));
+	return p;
+}
+
+// Q10: SELECT MobilePhoneModel, COUNT(DISTINCT UserID) AS u FROM hits
+//      WHERE MobilePhoneModel <> '' GROUP BY MobilePhoneModel ORDER BY u DESC LIMIT 10
+Plan Q10(columnar::ColumnarReader &rdr) {
+	Plan p;
+	AddScan(p, rdr, {"MobilePhoneModel", "UserID"});
+	AddFilter(p, Ne(C(p, "MobilePhoneModel"), exec::MakeConstStr("")));
+	AddHashAgg(p,
+		Cols(KV{"MobilePhoneModel", C(p, "MobilePhoneModel")}),
+		Aggs(Distinct("u", C(p, "UserID"))));
+	AddTopK(p, SortKeys(SK{C(p, "u"), false}), 10);
+	AddProject(p, Cols(
+		KV{"MobilePhoneModel", C(p, "MobilePhoneModel")},
+		KV{"u", C(p, "u")}));
+	return p;
+}
+
+// Q11: SELECT MobilePhone, MobilePhoneModel, COUNT(DISTINCT UserID) AS u FROM hits
+//      WHERE MobilePhoneModel <> '' GROUP BY MobilePhone, MobilePhoneModel ORDER BY u DESC LIMIT 10
+Plan Q11(columnar::ColumnarReader &rdr) {
+	Plan p;
+	AddScan(p, rdr, {"MobilePhone", "MobilePhoneModel", "UserID"});
+	AddFilter(p, Ne(C(p, "MobilePhoneModel"), exec::MakeConstStr("")));
+	AddHashAgg(p,
+		Cols(
+			KV{"MobilePhone", C(p, "MobilePhone")},
+			KV{"MobilePhoneModel", C(p, "MobilePhoneModel")}),
+		Aggs(Distinct("u", C(p, "UserID"))));
+	AddTopK(p, SortKeys(SK{C(p, "u"), false}), 10);
+	AddProject(p, Cols(
+		KV{"MobilePhone", C(p, "MobilePhone")},
+		KV{"MobilePhoneModel", C(p, "MobilePhoneModel")},
+		KV{"u", C(p, "u")}));
+	return p;
+}
+
+// Q12: SELECT SearchPhrase, COUNT(*) AS c FROM hits
+//      WHERE SearchPhrase <> '' GROUP BY SearchPhrase ORDER BY c DESC LIMIT 10
+Plan Q12(columnar::ColumnarReader &rdr) {
+	Plan p;
+	AddScan(p, rdr, {"SearchPhrase"});
+	AddFilter(p, Ne(C(p, "SearchPhrase"), exec::MakeConstStr("")));
+	AddHashAgg(p,
+		Cols(KV{"SearchPhrase", C(p, "SearchPhrase")}),
+		Aggs(CountStar("c")));
+	AddTopK(p, SortKeys(SK{C(p, "c"), false}), 10);
+	AddProject(p, Cols(
+		KV{"SearchPhrase", C(p, "SearchPhrase")},
+		KV{"c", C(p, "c")}));
+	return p;
+}
+
+// Q13: SELECT SearchPhrase, COUNT(DISTINCT UserID) AS u FROM hits
+//      WHERE SearchPhrase <> '' GROUP BY SearchPhrase ORDER BY u DESC LIMIT 10
+Plan Q13(columnar::ColumnarReader &rdr) {
+	Plan p;
+	AddScan(p, rdr, {"SearchPhrase", "UserID"});
+	AddFilter(p, Ne(C(p, "SearchPhrase"), exec::MakeConstStr("")));
+	AddHashAgg(p,
+		Cols(KV{"SearchPhrase", C(p, "SearchPhrase")}),
+		Aggs(Distinct("u", C(p, "UserID"))));
+	AddTopK(p, SortKeys(SK{C(p, "u"), false}), 10);
+	AddProject(p, Cols(
+		KV{"SearchPhrase", C(p, "SearchPhrase")},
+		KV{"u", C(p, "u")}));
+	return p;
+}
+
+// Q14: SELECT SearchEngineID, SearchPhrase, COUNT(*) AS c FROM hits
+//      WHERE SearchPhrase <> '' GROUP BY SearchEngineID, SearchPhrase ORDER BY c DESC LIMIT 10
+Plan Q14(columnar::ColumnarReader &rdr) {
+	Plan p;
+	AddScan(p, rdr, {"SearchEngineID", "SearchPhrase"});
+	AddFilter(p, Ne(C(p, "SearchPhrase"), exec::MakeConstStr("")));
+	AddHashAgg(p,
+		Cols(
+			KV{"SearchEngineID", C(p, "SearchEngineID")},
+			KV{"SearchPhrase", C(p, "SearchPhrase")}),
+		Aggs(CountStar("c")));
+	AddTopK(p, SortKeys(SK{C(p, "c"), false}), 10);
+	AddProject(p, Cols(
+		KV{"SearchEngineID", C(p, "SearchEngineID")},
+		KV{"SearchPhrase", C(p, "SearchPhrase")},
+		KV{"c", C(p, "c")}));
+	return p;
+}
+
+// Q15: SELECT UserID, COUNT(*) FROM hits GROUP BY UserID ORDER BY COUNT(*) DESC LIMIT 10
+Plan Q15(columnar::ColumnarReader &rdr) {
+	Plan p;
+	AddScan(p, rdr, {"UserID"});
+	AddHashAgg(p,
+		Cols(KV{"UserID", C(p, "UserID")}),
+		Aggs(CountStar("c")));
+	AddTopK(p, SortKeys(SK{C(p, "c"), false}), 10);
+	AddProject(p, Cols(
+		KV{"UserID", C(p, "UserID")},
+		KV{"c", C(p, "c")}));
+	return p;
+}
+
+// Q16: SELECT UserID, SearchPhrase, COUNT(*) FROM hits
+//      GROUP BY UserID, SearchPhrase ORDER BY COUNT(*) DESC LIMIT 10
+Plan Q16(columnar::ColumnarReader &rdr) {
+	Plan p;
+	AddScan(p, rdr, {"UserID", "SearchPhrase"});
+	AddHashAgg(p,
+		Cols(
+			KV{"UserID", C(p, "UserID")},
+			KV{"SearchPhrase", C(p, "SearchPhrase")}),
+		Aggs(CountStar("c")));
+	AddTopK(p, SortKeys(SK{C(p, "c"), false}), 10);
+	AddProject(p, Cols(
+		KV{"UserID", C(p, "UserID")},
+		KV{"SearchPhrase", C(p, "SearchPhrase")},
+		KV{"c", C(p, "c")}));
+	return p;
+}
+
+// Q17: SELECT UserID, SearchPhrase, COUNT(*) FROM hits
+//      GROUP BY UserID, SearchPhrase LIMIT 10
+Plan Q17(columnar::ColumnarReader &rdr) {
+	Plan p;
+	AddScan(p, rdr, {"UserID", "SearchPhrase"});
+	AddHashAgg(p,
+		Cols(
+			KV{"UserID", C(p, "UserID")},
+			KV{"SearchPhrase", C(p, "SearchPhrase")}),
+		Aggs(CountStar("c")));
+	AddTopK(p, SortKeys(SK{C(p, "UserID"), true}), 10);
+	AddProject(p, Cols(
+		KV{"UserID", C(p, "UserID")},
+		KV{"SearchPhrase", C(p, "SearchPhrase")},
+		KV{"c", C(p, "c")}));
+	return p;
+}
+
+// Q24: SELECT SearchPhrase FROM hits WHERE SearchPhrase <> '' ORDER BY EventTime LIMIT 10
+Plan Q24(columnar::ColumnarReader &rdr) {
+	Plan p;
+	AddScan(p, rdr, {"SearchPhrase", "EventTime"});
+	AddFilter(p, Ne(C(p, "SearchPhrase"), exec::MakeConstStr("")));
+	AddTopK(p, SortKeys(SK{C(p, "EventTime"), true}), 10);
+	AddProject(p, Cols(KV{"SearchPhrase", C(p, "SearchPhrase")}));
+	return p;
+}
+
+// Q25: SELECT SearchPhrase FROM hits WHERE SearchPhrase <> '' ORDER BY SearchPhrase LIMIT 10
+Plan Q25(columnar::ColumnarReader &rdr) {
+	Plan p;
+	AddScan(p, rdr, {"SearchPhrase"});
+	AddFilter(p, Ne(C(p, "SearchPhrase"), exec::MakeConstStr("")));
+	AddTopK(p, SortKeys(SK{C(p, "SearchPhrase"), true}), 10);
+	AddProject(p, Cols(KV{"SearchPhrase", C(p, "SearchPhrase")}));
+	return p;
+}
+
+// Q26: SELECT SearchPhrase FROM hits WHERE SearchPhrase <> '' ORDER BY EventTime, SearchPhrase LIMIT 10
+Plan Q26(columnar::ColumnarReader &rdr) {
+	Plan p;
+	AddScan(p, rdr, {"SearchPhrase", "EventTime"});
+	AddFilter(p, Ne(C(p, "SearchPhrase"), exec::MakeConstStr("")));
+	AddTopK(p, SortKeys(
+		SK{C(p, "EventTime"), true},
+		SK{C(p, "SearchPhrase"), true}), 10);
+	AddProject(p, Cols(KV{"SearchPhrase", C(p, "SearchPhrase")}));
+	return p;
+}
+
+// Q30: SELECT SearchEngineID, ClientIP, COUNT(*) AS c, SUM(IsRefresh), AVG(ResolutionWidth)
+//      FROM hits WHERE SearchPhrase <> '' GROUP BY SearchEngineID, ClientIP ORDER BY c DESC LIMIT 10
+Plan Q30(columnar::ColumnarReader &rdr) {
+	Plan p;
+	AddScan(p, rdr, {"SearchPhrase", "SearchEngineID", "ClientIP", "IsRefresh", "ResolutionWidth"});
+	AddFilter(p, Ne(C(p, "SearchPhrase"), exec::MakeConstStr("")));
+	AddHashAgg(p,
+		Cols(
+			KV{"SearchEngineID", C(p, "SearchEngineID")},
+			KV{"ClientIP", C(p, "ClientIP")}),
+		Aggs(
+			CountStar("c"),
+			Sum("sum_refresh", C(p, "IsRefresh")),
+			Avg("avg_width", C(p, "ResolutionWidth"))));
+	AddTopK(p, SortKeys(SK{C(p, "c"), false}), 10);
+	AddProject(p, Cols(
+		KV{"SearchEngineID", C(p, "SearchEngineID")},
+		KV{"ClientIP", C(p, "ClientIP")},
+		KV{"c", C(p, "c")},
+		KV{"sum_refresh", C(p, "sum_refresh")},
+		KV{"avg_width", C(p, "avg_width")}));
+	return p;
+}
+
+// Q31: same as Q30 but WatchID instead of SearchEngineID
+Plan Q31(columnar::ColumnarReader &rdr) {
+	Plan p;
+	AddScan(p, rdr, {"SearchPhrase", "WatchID", "ClientIP", "IsRefresh", "ResolutionWidth"});
+	AddFilter(p, Ne(C(p, "SearchPhrase"), exec::MakeConstStr("")));
+	AddHashAgg(p,
+		Cols(
+			KV{"WatchID", C(p, "WatchID")},
+			KV{"ClientIP", C(p, "ClientIP")}),
+		Aggs(
+			CountStar("c"),
+			Sum("sum_refresh", C(p, "IsRefresh")),
+			Avg("avg_width", C(p, "ResolutionWidth"))));
+	AddTopK(p, SortKeys(SK{C(p, "c"), false}), 10);
+	AddProject(p, Cols(
+		KV{"WatchID", C(p, "WatchID")},
+		KV{"ClientIP", C(p, "ClientIP")},
+		KV{"c", C(p, "c")},
+		KV{"sum_refresh", C(p, "sum_refresh")},
+		KV{"avg_width", C(p, "avg_width")}));
+	return p;
+}
+
+// Q32: same as Q31 but without WHERE
+Plan Q32(columnar::ColumnarReader &rdr) {
+	Plan p;
+	AddScan(p, rdr, {"WatchID", "ClientIP", "IsRefresh", "ResolutionWidth"});
+	AddHashAgg(p,
+		Cols(
+			KV{"WatchID", C(p, "WatchID")},
+			KV{"ClientIP", C(p, "ClientIP")}),
+		Aggs(
+			CountStar("c"),
+			Sum("sum_refresh", C(p, "IsRefresh")),
+			Avg("avg_width", C(p, "ResolutionWidth"))));
+	AddTopK(p, SortKeys(SK{C(p, "c"), false}), 10);
+	AddProject(p, Cols(
+		KV{"WatchID", C(p, "WatchID")},
+		KV{"ClientIP", C(p, "ClientIP")},
+		KV{"c", C(p, "c")},
+		KV{"sum_refresh", C(p, "sum_refresh")},
+		KV{"avg_width", C(p, "avg_width")}));
+	return p;
+}
+
+// Q33: SELECT URL, COUNT(*) AS c FROM hits GROUP BY URL ORDER BY c DESC LIMIT 10
+Plan Q33(columnar::ColumnarReader &rdr) {
+	Plan p;
+	AddScan(p, rdr, {"URL"});
+	AddHashAgg(p,
+		Cols(KV{"URL", C(p, "URL")}),
+		Aggs(CountStar("c")));
+	AddTopK(p, SortKeys(SK{C(p, "c"), false}), 10);
+	AddProject(p, Cols(KV{"URL", C(p, "URL")}, KV{"c", C(p, "c")}));
+	return p;
+}
+
+// Q34: SELECT 1, URL, COUNT(*) AS c FROM hits GROUP BY 1, URL ORDER BY c DESC LIMIT 10
+Plan Q34(columnar::ColumnarReader &rdr) {
+	Plan p;
+	AddScan(p, rdr, {"URL"});
+	AddHashAgg(p,
+		Cols(KV{"URL", C(p, "URL")}),
+		Aggs(CountStar("c")));
+	AddTopK(p, SortKeys(SK{C(p, "c"), false}), 10);
+	AddProject(p, Cols(
+		KV{"const_1", exec::MakeConstI64(1)},
+		KV{"URL", C(p, "URL")},
+		KV{"c", C(p, "c")}));
+	return p;
+}
+
 // Q19: SELECT UserID FROM hits WHERE UserID = 435090932899640449
 Plan Q19(columnar::ColumnarReader &rdr) {
 	Plan p;
@@ -200,7 +536,26 @@ const std::vector<QueryEntry> kQueries = {
 	{"Q4", &Q4},
 	{"Q5", &Q5},
 	{"Q6", &Q6},
+	{"Q7", &Q7},
+	{"Q8", &Q8},
+	{"Q9", &Q9},
+	{"Q10", &Q10},
+	{"Q11", &Q11},
+	{"Q12", &Q12},
+	{"Q13", &Q13},
+	{"Q14", &Q14},
+	{"Q15", &Q15},
+	{"Q16", &Q16},
+	{"Q17", &Q17},
 	{"Q19", &Q19},
+	{"Q24", &Q24},
+	{"Q25", &Q25},
+	{"Q26", &Q26},
+	{"Q30", &Q30},
+	{"Q31", &Q31},
+	{"Q32", &Q32},
+	{"Q33", &Q33},
+	{"Q34", &Q34},
 };
 
 std::string CellToString(const DataVector &col, std::size_t row) {
