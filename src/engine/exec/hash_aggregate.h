@@ -42,9 +42,11 @@ private:
 	Schema out_schema_;
 
 	bool consumed_ = false;
+	bool use_fast_ = false;
 	std::unique_ptr<Batch> result_;
 
 	void Consume();
+	void ConsumeFast();
 };
 
 }

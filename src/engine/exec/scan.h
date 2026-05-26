@@ -49,6 +49,11 @@ public:
 
 	std::optional<ExecBatch> Next() override {
 		if (next_batch_ >= reader_.NumBatches()) return std::nullopt;
+
+		if (next_batch_ + 1 < reader_.NumBatches()) {
+			reader_.Prefetch(next_batch_ + 1, projection_);
+		}
+
 		current_ = std::make_unique<Batch>(reader_.ReadBatchColumns(next_batch_, projection_));
 		++next_batch_;
 		ExecBatch e;

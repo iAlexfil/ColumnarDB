@@ -1,33 +1,31 @@
 #include "columnar_reader.h"
 
+#include <cstring>
 #include <stdexcept>
 #include <string>
 
+#include <fcntl.h>
+#include <sys/mman.h>
+#include <sys/stat.h>
+#include <unistd.h>
+
 #include "batch.h"
 #include "columnar_format.h"
-#include "utils/utils.h"
 
+namespace {
 
 template<class T>
-T ReadObj(std::ifstream &in) {
-	T v{};
-	in.read(reinterpret_cast<char *>(&v), sizeof(T));
-	if (!in) {
-		throw std::runtime_error("failed to read from file");
-	}
+T ReadAt(const std::uint8_t *base, std::size_t off) {
+	T v;
+	std::memcpy(&v, base + off, sizeof(T));
 	return v;
 }
 
-void ReadBytes(std::ifstream &in, void *data, std::size_t size) {
-	in.read(static_cast<char *>(data), static_cast<std::streamsize>(size));
-	if (!in) throw std::runtime_error("failed to read from file");
-}
-
-std::string ReadString(std::ifstream &in) {
-	const auto len = ReadObj<std::uint32_t>(in);
-	std::string s;
-	s.resize(len);
-	if (len > 0) ReadBytes(in, s.data(), len);
+std::string ReadStringAt(const std::uint8_t *base, std::size_t &off) {
+	const auto len = ReadAt<std::uint32_t>(base, off);
+	off += sizeof(std::uint32_t);
+	std::string s(reinterpret_cast<const char*>(base + off), len);
+	off += len;
 	return s;
 }
 
@@ -51,57 +49,103 @@ DataType ToDataType(std::uint8_t raw) {
 	throw std::runtime_error("unknown DataType");
 }
 
+}
 
 namespace columnar {
-	ColumnarReader::ColumnarReader(const std::filesystem::path &path)
-		: in_(path, std::ios::binary) {
-		if (!in_.is_open()) {
+	ColumnarReader::ColumnarReader(const std::filesystem::path &path) {
+		fd_ = ::open(path.c_str(), O_RDONLY);
+		if (fd_ < 0) {
 			throw std::runtime_error("columnar: failed to open file for reading: " + path.string());
 		}
+
+		struct stat st{};
+		if (::fstat(fd_, &st) != 0) {
+			::close(fd_);
+			fd_ = -1;
+			throw std::runtime_error("columnar: fstat failed");
+		}
+		mapped_size_ = static_cast<std::size_t>(st.st_size);
+
+		void *m = ::mmap(nullptr, mapped_size_, PROT_READ, MAP_PRIVATE, fd_, 0);
+		if (m == MAP_FAILED) {
+			::close(fd_);
+			fd_ = -1;
+			throw std::runtime_error("columnar: mmap failed");
+		}
+		mapped_ = static_cast<const std::uint8_t*>(m);
+
 		ReadHeader();
 		ReadFooter();
 	}
 
+	void ColumnarReader::Prefetch(std::size_t batch_idx,
+	                              const std::vector<std::size_t> &col_indices) const {
+		if (batch_idx >= batches_.size() || fd_ < 0) return;
+		const auto &meta = batches_[batch_idx];
+		for (auto c : col_indices) {
+			if (c >= meta.columns.size()) continue;
+			const auto &ch = meta.columns[c];
+			if (ch.size == 0) continue;
+			::readahead(fd_, static_cast<off64_t>(ch.offset), ch.size);
+		}
+	}
+
+	ColumnarReader::~ColumnarReader() {
+		if (mapped_) {
+			::munmap(const_cast<std::uint8_t*>(mapped_), mapped_size_);
+			mapped_ = nullptr;
+		}
+		if (fd_ >= 0) {
+			::close(fd_);
+			fd_ = -1;
+		}
+	}
+
 	void ColumnarReader::ReadHeader() {
-		char magic[4];
-		ReadBytes(in_, magic, sizeof(magic));
+		if (mapped_size_ < 16) throw std::runtime_error("columnar: file too small");
+		const char *magic = reinterpret_cast<const char*>(mapped_);
 		if (!(magic[0] == 'C' && magic[1] == 'D' && magic[2] == 'B' && magic[3] == '1')) {
 			throw std::runtime_error("columnar: bad format file");
 		}
-
-		const auto version = ReadObj<std::uint32_t>(in_);
+		const auto version = ReadAt<std::uint32_t>(mapped_, 4);
 		if (version != kColumnarVersion) {
 			throw std::runtime_error("unsupported version: " + std::to_string(version));
 		}
-
-		footer_offset_ = ReadObj<std::uint64_t>(in_);
-		if (footer_offset_ == 0) {
+		footer_offset_ = ReadAt<std::uint64_t>(mapped_, 8);
+		if (footer_offset_ == 0 || footer_offset_ >= mapped_size_) {
 			throw std::runtime_error("bad footer offset");
 		}
 	}
 
 	void ColumnarReader::ReadFooter() {
-		utils::Seek(in_, footer_offset_);
-
-		const auto ncols = ReadObj<std::uint32_t>(in_);
+		std::size_t off = footer_offset_;
+		const auto ncols = ReadAt<std::uint32_t>(mapped_, off);
+		off += sizeof(std::uint32_t);
 
 		schema_.clear();
 		schema_.reserve(ncols);
 		for (std::uint32_t i = 0; i < ncols; ++i) {
-			std::string name = ReadString(in_);
-			schema_.push_back(ColumnSchema{std::move(name), ToDataType(ReadObj<std::uint8_t>(in_))});
+			std::string name = ReadStringAt(mapped_, off);
+			std::uint8_t raw = ReadAt<std::uint8_t>(mapped_, off);
+			off += sizeof(std::uint8_t);
+			schema_.push_back(ColumnSchema{std::move(name), ToDataType(raw)});
 		}
 
-		const auto nrg = ReadObj<std::uint32_t>(in_);
+		const auto nrg = ReadAt<std::uint32_t>(mapped_, off);
+		off += sizeof(std::uint32_t);
+
 		batches_.clear();
 		batches_.reserve(nrg);
 		for (std::uint32_t rg = 0; rg < nrg; ++rg) {
 			BatchMeta meta;
-			meta.row_count = ReadObj<std::uint32_t>(in_);
+			meta.row_count = ReadAt<std::uint32_t>(mapped_, off);
+			off += sizeof(std::uint32_t);
 			meta.columns.resize(ncols);
 			for (std::uint32_t c = 0; c < ncols; ++c) {
-				meta.columns[c].offset = ReadObj<std::uint64_t>(in_);
-				meta.columns[c].size = ReadObj<std::uint64_t>(in_);
+				meta.columns[c].offset = ReadAt<std::uint64_t>(mapped_, off);
+				off += sizeof(std::uint64_t);
+				meta.columns[c].size = ReadAt<std::uint64_t>(mapped_, off);
+				off += sizeof(std::uint64_t);
 			}
 			batches_.push_back(std::move(meta));
 		}
@@ -119,11 +163,11 @@ namespace columnar {
 	                                   DataVector &dst, std::size_t nrows) {
 		const auto &cs = schema_[src_col];
 		const auto &ch = batches_[batch_idx].columns[src_col];
-		utils::Seek(in_, ch.offset);
+		const std::uint8_t *p = mapped_ + ch.offset;
 
 		auto readFixed = [&]<class T>(std::vector<T> &vec) {
 			vec.resize(nrows);
-			if (nrows > 0) ReadBytes(in_, vec.data(), nrows * sizeof(T));
+			if (nrows > 0) std::memcpy(vec.data(), p, nrows * sizeof(T));
 		};
 
 		switch (cs.type) {
@@ -142,11 +186,12 @@ namespace columnar {
 			case DataType::String: {
 				auto &vec = std::get<std::vector<std::string>>(dst);
 				vec.resize(nrows);
-				std::vector<std::uint32_t> lens(nrows);
-				if (nrows > 0) ReadBytes(in_, lens.data(), nrows * sizeof(std::uint32_t));
+				const std::uint32_t *lens = reinterpret_cast<const std::uint32_t*>(p);
+				const std::uint8_t *data = p + nrows * sizeof(std::uint32_t);
+				std::size_t off = 0;
 				for (std::size_t i = 0; i < nrows; ++i) {
-					vec[i].resize(lens[i]);
-					if (lens[i] > 0) ReadBytes(in_, vec[i].data(), lens[i]);
+					vec[i].assign(reinterpret_cast<const char*>(data + off), lens[i]);
+					off += lens[i];
 				}
 				return;
 			}

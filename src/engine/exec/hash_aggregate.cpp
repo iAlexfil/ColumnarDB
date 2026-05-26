@@ -1,6 +1,8 @@
 #include "hash_aggregate.h"
 
+#include <array>
 #include <cstdint>
+#include <cstring>
 #include <functional>
 #include <stdexcept>
 #include <type_traits>
@@ -13,6 +15,25 @@ namespace exec {
 using KeyVal = std::variant<std::int64_t, std::uint64_t, double, std::string, std::uint8_t>;
 
 namespace {
+
+constexpr std::size_t kMaxFastKeys = 4;
+
+struct FastKey {
+	std::array<std::int64_t, kMaxFastKeys> data{};
+	bool operator==(const FastKey &o) const noexcept {
+		return std::memcmp(data.data(), o.data.data(), sizeof(data)) == 0;
+	}
+};
+
+struct FastKeyHash {
+	std::size_t operator()(const FastKey &k) const noexcept {
+		std::size_t h = 1469598103934665603ULL;
+		for (std::size_t i = 0; i < kMaxFastKeys; ++i) {
+			h ^= std::hash<std::int64_t>{}(k.data[i]) + 0x9e3779b97f4a7c15ULL + (h << 6) + (h >> 2);
+		}
+		return h;
+	}
+};
 
 struct GroupKey {
 	std::vector<KeyVal> v;
@@ -234,6 +255,11 @@ HashAggregate::HashAggregate(Operator &child,
 	for (std::size_t i = 0; i < agg_names_.size(); ++i) {
 		out_schema_.push_back(ColumnSchema{agg_names_[i], aggs_[i]->OutputType()});
 	}
+
+	use_fast_ = key_types_.size() <= kMaxFastKeys;
+	for (EvalType t : key_types_) {
+		if (t == EvalType::Str || t == EvalType::F64) { use_fast_ = false; break; }
+	}
 }
 
 HashAggregate::~HashAggregate() = default;
@@ -292,13 +318,88 @@ void HashAggregate::Consume() {
 
 std::optional<ExecBatch> HashAggregate::Next() {
 	if (!consumed_) {
-		Consume();
+		if (use_fast_) ConsumeFast();
+		else Consume();
 		consumed_ = true;
 		ExecBatch out;
 		out.batch = result_.get();
 		return out;
 	}
 	return std::nullopt;
+}
+
+namespace {
+
+std::int64_t ExtractKeyAsI64(const EvalCol &col, std::size_t row) {
+	return std::visit([row](const auto &v) -> std::int64_t {
+		using T = typename std::decay_t<decltype(v)>::value_type;
+		if constexpr (std::is_arithmetic_v<T>) return static_cast<std::int64_t>(v[row]);
+		else throw std::runtime_error("ExtractKeyAsI64: non-numeric column");
+	}, col);
+}
+
+void AppendIntAs(DataVector &slot, std::int64_t v) {
+	std::visit([v](auto &vec) {
+		using T = typename std::decay_t<decltype(vec)>::value_type;
+		if constexpr (std::is_integral_v<T>) vec.push_back(static_cast<T>(v));
+		else throw std::runtime_error("AppendIntAs: non-integer slot");
+	}, slot);
+}
+
+}
+
+void HashAggregate::ConsumeFast() {
+	std::unordered_map<FastKey, std::uint32_t, FastKeyHash> map;
+	std::vector<std::uint32_t> gids;
+	std::uint32_t num_groups = 0;
+	const std::size_t nkeys = key_types_.size();
+
+	while (auto eb = child_.Next()) {
+		EvalContext ctx{eb->batch, eb->full_selection() ? nullptr : &eb->sel};
+
+		std::vector<EvalCol> key_cols;
+		key_cols.reserve(nkeys);
+		for (const auto &e : key_exprs_) key_cols.push_back(e->eval(ctx));
+
+		const std::size_t n = ctx.rows();
+		gids.assign(n, 0);
+		for (std::size_t r = 0; r < n; ++r) {
+			FastKey k;
+			for (std::size_t i = 0; i < nkeys; ++i) {
+				k.data[i] = ExtractKeyAsI64(key_cols[i], r);
+			}
+
+			auto it = map.find(k);
+			std::uint32_t gid;
+			if (it == map.end()) {
+				gid = num_groups++;
+				map.emplace(k, gid);
+				for (auto &a : aggs_) a->EnsureGroups(num_groups);
+			} else {
+				gid = it->second;
+			}
+			gids[r] = gid;
+		}
+
+		for (auto &a : aggs_) a->UpdateBatch(gids, ctx);
+	}
+
+	result_ = std::make_unique<Batch>(out_schema_);
+	result_->Reserve(num_groups);
+
+	std::vector<const FastKey*> sorted_keys(num_groups);
+	for (const auto &[k, gid] : map) sorted_keys[gid] = &k;
+
+	for (std::uint32_t gid = 0; gid < num_groups; ++gid) {
+		const FastKey &fk = *sorted_keys[gid];
+		for (std::size_t i = 0; i < nkeys; ++i) {
+			AppendIntAs(result_->GetColumn(i), fk.data[i]);
+		}
+	}
+	for (std::size_t i = 0; i < aggs_.size(); ++i) {
+		aggs_[i]->EmitInto(result_->GetColumn(nkeys + i));
+	}
+	result_->SetRowCount(num_groups);
 }
 
 }
