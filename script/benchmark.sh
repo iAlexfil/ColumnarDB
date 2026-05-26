@@ -60,7 +60,11 @@ log "Loading hits into DuckDB"
 START=$(date +%s)
 "${DUCKDB_BIN}" "${DUCK_DB}" -c ".read ${WORK}/create.sql"
 "${DUCKDB_BIN}" "${DUCK_DB}" -c "
-COPY hits FROM '${HITS_CSV}' (FORMAT CSV, HEADER FALSE, DELIMITER ',', QUOTE '\"');
+COPY hits FROM '${HITS_CSV}' (
+  FORMAT CSV, HEADER FALSE, DELIMITER ',', QUOTE '\"',
+  DATEFORMAT '%Y-%m-%d', TIMESTAMPFORMAT '%Y-%m-%d %H:%M:%S',
+  IGNORE_ERRORS TRUE
+);
 SELECT COUNT(*) AS rows FROM hits;
 "
 END=$(date +%s)

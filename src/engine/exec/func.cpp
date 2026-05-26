@@ -142,6 +142,24 @@ EvalCol FnDateTrunc(const std::vector<EvalCol> &args, std::size_t n) {
 	return out;
 }
 
+std::string ConvertBackslashToEcma(const std::string &s) {
+	std::string out;
+	out.reserve(s.size());
+	for (std::size_t i = 0; i < s.size(); ++i) {
+		if (s[i] == '\\' && i + 1 < s.size() && s[i + 1] >= '0' && s[i + 1] <= '9') {
+			out.push_back('$');
+			out.push_back(s[i + 1]);
+			++i;
+		} else if (s[i] == '$') {
+			out.push_back('$');
+			out.push_back('$');
+		} else {
+			out.push_back(s[i]);
+		}
+	}
+	return out;
+}
+
 EvalCol FnRegexpReplace(const std::vector<EvalCol> &args, std::size_t n) {
 	const auto &s = GetStr(args[0]);
 	const auto &p = GetStr(args[1]);
@@ -149,13 +167,15 @@ EvalCol FnRegexpReplace(const std::vector<EvalCol> &args, std::size_t n) {
 	std::vector<std::string> out(n);
 	if (p.empty()) return out;
 
-	if (AllSame(p)) {
+	if (AllSame(p) && AllSame(r)) {
 		std::regex re(p[0]);
-		for (std::size_t i = 0; i < n; ++i) out[i] = std::regex_replace(s[i], re, r[i]);
+		std::string ecma_repl = ConvertBackslashToEcma(r[0]);
+		for (std::size_t i = 0; i < n; ++i) out[i] = std::regex_replace(s[i], re, ecma_repl);
 	} else {
 		for (std::size_t i = 0; i < n; ++i) {
 			std::regex re(p[i]);
-			out[i] = std::regex_replace(s[i], re, r[i]);
+			std::string ecma_repl = ConvertBackslashToEcma(r[i]);
+			out[i] = std::regex_replace(s[i], re, ecma_repl);
 		}
 	}
 	return out;

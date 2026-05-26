@@ -240,8 +240,8 @@ HashAggregate::~HashAggregate() = default;
 
 void HashAggregate::Consume() {
 	std::unordered_map<GroupKey, std::uint32_t, GroupKeyHash> map;
-	std::vector<GroupKey> order;
 	std::vector<std::uint32_t> gids;
+	std::uint32_t num_groups = 0;
 
 	while (auto eb = child_.Next()) {
 		EvalContext ctx{eb->batch, eb->full_selection() ? nullptr : &eb->sel};
@@ -260,10 +260,9 @@ void HashAggregate::Consume() {
 			auto it = map.find(k);
 			std::uint32_t gid;
 			if (it == map.end()) {
-				gid = static_cast<std::uint32_t>(order.size());
-				order.push_back(k);
+				gid = num_groups++;
 				map.emplace(std::move(k), gid);
-				for (auto &a : aggs_) a->EnsureGroups(order.size());
+				for (auto &a : aggs_) a->EnsureGroups(num_groups);
 			} else {
 				gid = it->second;
 			}
@@ -274,8 +273,13 @@ void HashAggregate::Consume() {
 	}
 
 	result_ = std::make_unique<Batch>(out_schema_);
-	result_->Reserve(order.size());
-	for (const auto &gk : order) {
+	result_->Reserve(num_groups);
+
+	std::vector<const GroupKey*> sorted_keys(num_groups);
+	for (const auto &[k, gid] : map) sorted_keys[gid] = &k;
+
+	for (std::uint32_t gid = 0; gid < num_groups; ++gid) {
+		const GroupKey &gk = *sorted_keys[gid];
 		for (std::size_t i = 0; i < gk.v.size(); ++i) {
 			AppendKey(result_->GetColumn(i), gk.v[i]);
 		}
@@ -283,7 +287,7 @@ void HashAggregate::Consume() {
 	for (std::size_t i = 0; i < aggs_.size(); ++i) {
 		aggs_[i]->EmitInto(result_->GetColumn(key_exprs_.size() + i));
 	}
-	result_->SetRowCount(order.size());
+	result_->SetRowCount(num_groups);
 }
 
 std::optional<ExecBatch> HashAggregate::Next() {

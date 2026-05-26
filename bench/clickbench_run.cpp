@@ -4,11 +4,13 @@
 #include <fstream>
 #include <iomanip>
 #include <iostream>
+#include <cstdio>
 #include <memory>
 #include <set>
 #include <sstream>
 #include <stdexcept>
 #include <string>
+#include <unordered_map>
 #include <utility>
 #include <variant>
 #include <vector>
@@ -25,6 +27,7 @@
 #include "schema.h"
 #include "sort.h"
 #include "topk.h"
+#include "utils/parse.h"
 
 namespace fs = std::filesystem;
 
@@ -37,6 +40,7 @@ namespace {
 	struct Plan {
 		std::vector<std::unique_ptr<exec::Operator> > nodes;
 		exec::Operator *root = nullptr;
+		std::unordered_map<std::string, DataType> format_hints;
 	};
 
 	void AddOp(Plan &p, std::unique_ptr<exec::Operator> op) {
@@ -63,12 +67,27 @@ namespace {
 		AddOp(p, std::make_unique<exec::Project>(*p.root, std::move(outs)));
 	}
 
+	void AppendTiebreakers(Plan &p, std::vector<std::pair<ExprPtr, bool> > &keys) {
+		const auto &sch = p.root->OutputSchema();
+		for (const auto &col : sch) {
+			keys.emplace_back(exec::MakeColumnByName(sch, col.name), true);
+		}
+	}
+
 	void AddSort(Plan &p, std::vector<std::pair<ExprPtr, bool> > keys) {
+		AppendTiebreakers(p, keys);
 		AddOp(p, std::make_unique<exec::Sort>(*p.root, std::move(keys)));
 	}
 
 	void AddTopK(Plan &p, std::vector<std::pair<ExprPtr, bool> > keys, std::size_t k) {
+		AppendTiebreakers(p, keys);
 		AddOp(p, std::make_unique<exec::TopK>(*p.root, std::move(keys), k));
+	}
+
+	void AddSortLimitOffset(Plan &p, std::vector<std::pair<ExprPtr, bool> > keys,
+	                         std::size_t limit, std::size_t offset) {
+		AppendTiebreakers(p, keys);
+		AddOp(p, std::make_unique<exec::Sort>(*p.root, std::move(keys), limit, offset));
 	}
 
 	ExprPtr C(const Plan &p, std::string_view name) {
@@ -265,6 +284,7 @@ namespace {
 			           Min("min", C(p, "EventDate")),
 			           Max("max", C(p, "EventDate"))));
 		AddProject(p, Cols(KV{"min", C(p, "min")}, KV{"max", C(p, "max")}));
+		p.format_hints = {{"min", DataType::Date}, {"max", DataType::Date}};
 		return p;
 	}
 
@@ -622,7 +642,7 @@ namespace {
 		AddScan(p, rdr, {"Referer"});
 		AddFilter(p, Ne(C(p, "Referer"), exec::MakeConstStr("")));
 		AddProject(p, Cols(
-			           KV{"k", RegexpReplace(C(p, "Referer"), R"(^https?://(?:www\.)?([^/]+)/.*$)", "$1")},
+			           KV{"k", RegexpReplace(C(p, "Referer"), R"(^https?://(?:www\.)?([^/]+)/.*$)", "\\1")},
 			           KV{"ref_len", Length(C(p, "Referer"))},
 			           KV{"Referer", C(p, "Referer")}));
 		AddHashAgg(p,
@@ -833,8 +853,7 @@ namespace {
 		AddHashAgg(p,
 		           Cols(KV{"URL", C(p, "URL")}),
 		           Aggs(CountStar("PageViews")));
-		AddOp(p, std::make_unique<exec::Sort>(*p.root,
-		                                      SortKeys(SK{C(p, "PageViews"), false}), 10, 1000));
+		AddSortLimitOffset(p, SortKeys(SK{C(p, "PageViews"), false}), 10, 1000);
 		AddProject(p, Cols(KV{"URL", C(p, "URL")}, KV{"PageViews", C(p, "PageViews")}));
 		return p;
 	}
@@ -872,8 +891,7 @@ namespace {
 			           KV{"Src", C(p, "Src")},
 			           KV{"Dst", C(p, "Dst")}),
 		           Aggs(CountStar("PageViews")));
-		AddOp(p, std::make_unique<exec::Sort>(*p.root,
-		                                      SortKeys(SK{C(p, "PageViews"), false}), 10, 1000));
+		AddSortLimitOffset(p, SortKeys(SK{C(p, "PageViews"), false}), 10, 1000);
 		AddProject(p, Cols(
 			           KV{"TraficSourceID", C(p, "TraficSourceID")},
 			           KV{"SearchEngineID", C(p, "SearchEngineID")},
@@ -899,12 +917,12 @@ namespace {
 		AddHashAgg(p,
 		           Cols(KV{"URLHash", C(p, "URLHash")}, KV{"EventDate", C(p, "EventDate")}),
 		           Aggs(CountStar("PageViews")));
-		AddOp(p, std::make_unique<exec::Sort>(*p.root,
-		                                      SortKeys(SK{C(p, "PageViews"), false}), 10, 100));
+		AddSortLimitOffset(p, SortKeys(SK{C(p, "PageViews"), false}), 10, 100);
 		AddProject(p, Cols(
 			           KV{"URLHash", C(p, "URLHash")},
 			           KV{"EventDate", C(p, "EventDate")},
 			           KV{"PageViews", C(p, "PageViews")}));
+		p.format_hints = {{"EventDate", DataType::Date}};
 		return p;
 	}
 
@@ -928,8 +946,7 @@ namespace {
 			           KV{"WindowClientWidth", C(p, "WindowClientWidth")},
 			           KV{"WindowClientHeight", C(p, "WindowClientHeight")}),
 		           Aggs(CountStar("PageViews")));
-		AddOp(p, std::make_unique<exec::Sort>(*p.root,
-		                                      SortKeys(SK{C(p, "PageViews"), false}), 10, 10000));
+		AddSortLimitOffset(p, SortKeys(SK{C(p, "PageViews"), false}), 10, 10000);
 		AddProject(p, Cols(
 			           KV{"WindowClientWidth", C(p, "WindowClientWidth")},
 			           KV{"WindowClientHeight", C(p, "WindowClientHeight")},
@@ -955,9 +972,9 @@ namespace {
 		AddHashAgg(p,
 		           Cols(KV{"M", C(p, "M")}),
 		           Aggs(CountStar("PageViews")));
-		AddOp(p, std::make_unique<exec::Sort>(*p.root,
-		                                      SortKeys(SK{C(p, "M"), true}), 10, 1000));
+		AddSortLimitOffset(p, SortKeys(SK{C(p, "M"), true}), 10, 1000);
 		AddProject(p, Cols(KV{"M", C(p, "M")}, KV{"PageViews", C(p, "PageViews")}));
+		p.format_hints = {{"M", DataType::DateTime}};
 		return p;
 	}
 
@@ -1007,34 +1024,68 @@ namespace {
 		{42, &Q42},
 	};
 
-	std::string CellToString(const DataVector &col, std::size_t row) {
-		return std::visit([&](const auto &v) -> std::string {
+	void WriteQuotedString(std::ostream &out, const std::string &s) {
+		out.put('"');
+		for (char c : s) {
+			if (c == '"') out.put('"');
+			out.put(c);
+		}
+		out.put('"');
+	}
+
+	void WriteCell(std::ostream &out, const DataVector &col, std::size_t row, DataType out_type) {
+		std::visit([&](const auto &v) {
 			using T = typename std::decay_t<decltype(v)>::value_type;
-			if constexpr (std::is_same_v<T, std::string>) return v[row];
-			else return std::to_string(v[row]);
+			if constexpr (std::is_same_v<T, std::string>) {
+				WriteQuotedString(out, v[row]);
+			} else if constexpr (std::is_floating_point_v<T>) {
+				char buf[64];
+				std::snprintf(buf, sizeof(buf), "%.15g", static_cast<double>(v[row]));
+				out << buf;
+			} else if constexpr (std::is_integral_v<T>) {
+				if (out_type == DataType::Date) {
+					char buf[utils::kDateBufSize];
+					utils::FormatDate(static_cast<std::int32_t>(v[row]), buf);
+					out.write(buf, utils::kDateBufSize);
+				} else if (out_type == DataType::DateTime) {
+					char buf[utils::kDateTimeBufSize];
+					utils::FormatDateTime(static_cast<std::int64_t>(v[row]), buf);
+					out.write(buf, utils::kDateTimeBufSize);
+				} else {
+					out << v[row];
+				}
+			}
 		}, col);
 	}
 
-	void WritePlanToCsv(exec::Operator &root, const fs::path &path) {
+	void WritePlanToCsv(const Plan &plan, const fs::path &path) {
 		std::ofstream out(path);
 		if (!out) throw std::runtime_error("cannot open output: " + path.string());
-		CSVWriter writer(out);
 
+		exec::Operator &root = *plan.root;
+		std::vector<DataType> out_types;
 		bool wrote_header = false;
+
 		while (auto eb = root.Next()) {
 			const Batch &b = *eb->batch;
 			if (!wrote_header) {
-				std::vector<std::string> hdr;
-				for (const auto &c: b.GetSchema()) hdr.push_back(c.name);
-				writer.WriteNext(hdr);
+				const auto &sch = b.GetSchema();
+				out_types.resize(sch.size());
+				for (std::size_t c = 0; c < sch.size(); ++c) {
+					auto it = plan.format_hints.find(sch[c].name);
+					out_types[c] = (it != plan.format_hints.end()) ? it->second : sch[c].type;
+					if (c > 0) out.put(',');
+					out << sch[c].name;
+				}
+				out.put('\n');
 				wrote_header = true;
 			}
 			for (std::size_t r = 0; r < b.RowCount(); ++r) {
-				std::vector<std::string> row;
 				for (std::size_t c = 0; c < b.ColCount(); ++c) {
-					row.push_back(CellToString(b.GetColumn(c), r));
+					if (c > 0) out.put(',');
+					WriteCell(out, b.GetColumn(c), r, out_types[c]);
 				}
-				writer.WriteNext(row);
+				out.put('\n');
 			}
 		}
 		out.flush();
@@ -1098,7 +1149,7 @@ int main(int argc, char **argv) {
 			try {
 				Plan plan = q.build(rdr);
 				const fs::path csv_path = fs::path(output_dir) / ("q" + FormatIndex(q.index) + ".csv");
-				WritePlanToCsv(*plan.root, csv_path);
+				WritePlanToCsv(plan, csv_path);
 
 				const double secs = std::chrono::duration<double>(
 					std::chrono::steady_clock::now() - t0).count();

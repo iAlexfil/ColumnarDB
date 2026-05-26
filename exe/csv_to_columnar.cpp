@@ -22,8 +22,11 @@ void SplitCsvLine(const char *line, std::size_t len, std::vector<std::string> &o
 	out.clear();
 	std::string field;
 	bool in_quotes = false;
+	bool field_started = false;
+
 	for (std::size_t i = 0; i < len; ++i) {
 		char c = line[i];
+
 		if (in_quotes) {
 			if (c == '"') {
 				if (i + 1 < len && line[i + 1] == '"') {
@@ -36,13 +39,16 @@ void SplitCsvLine(const char *line, std::size_t len, std::vector<std::string> &o
 				field.push_back(c);
 			}
 		} else {
-			if (c == '"') {
-				in_quotes = true;
-			} else if (c == ',') {
+			if (c == ',') {
 				out.push_back(std::move(field));
 				field.clear();
+				field_started = false;
+			} else if (c == '"' && !field_started) {
+				in_quotes = true;
+				field_started = true;
 			} else {
 				field.push_back(c);
+				field_started = true;
 			}
 		}
 	}
@@ -87,46 +93,35 @@ int main(int argc, char **argv) {
 		batch.Reserve(kBatchRows);
 
 		std::size_t total_rows = 0;
+		std::size_t skipped_field_count = 0;
+		std::size_t skipped_parse = 0;
 		std::size_t line_no = 0;
 		std::vector<std::string> fields;
 		char *line_buf = nullptr;
 		std::size_t line_cap = 0;
 
-		std::string accum;
 		while (true) {
 			ssize_t nread = getline(&line_buf, &line_cap, fp);
-			if (nread < 0) {
-				if (!accum.empty()) {
-					SplitCsvLine(accum.data(), accum.size(), fields);
-					batch.AppendRow(fields, line_no);
-				}
-				break;
-			}
+			if (nread < 0) break;
 			++line_no;
 
 			while (nread > 0 && (line_buf[nread - 1] == '\n' || line_buf[nread - 1] == '\r'))
 				--nread;
+			if (nread == 0) continue;
 
-			if (!accum.empty()) {
-				accum.push_back('\n');
-				accum.append(line_buf, static_cast<std::size_t>(nread));
-				std::size_t quotes = 0;
-				for (char c : accum) { if (c == '"') ++quotes; }
-				if (quotes % 2 != 0) continue;
-				SplitCsvLine(accum.data(), accum.size(), fields);
-				accum.clear();
-			} else {
-				if (nread == 0) continue;
-				std::size_t quotes = 0;
-				for (ssize_t j = 0; j < nread; ++j) { if (line_buf[j] == '"') ++quotes; }
-				if (quotes % 2 != 0) {
-					accum.assign(line_buf, static_cast<std::size_t>(nread));
-					continue;
-				}
-				SplitCsvLine(line_buf, static_cast<std::size_t>(nread), fields);
+			SplitCsvLine(line_buf, static_cast<std::size_t>(nread), fields);
+
+			if (fields.size() != schema.size()) {
+				++skipped_field_count;
+				continue;
 			}
 
-			batch.AppendRow(fields, line_no);
+			try {
+				batch.AppendRow(fields, line_no);
+			} catch (const std::exception &) {
+				++skipped_parse;
+				continue;
+			}
 
 			if (batch.RowCount() >= kBatchRows) {
 				writer.WriteBatch(batch);
@@ -145,6 +140,10 @@ int main(int argc, char **argv) {
 		writer.Finish();
 
 		std::cout << "wrote " << total_rows << " rows to " << output << "\n";
+		if (skipped_field_count + skipped_parse > 0) {
+			std::cout << "skipped " << skipped_field_count << " rows (field count mismatch), "
+			          << skipped_parse << " rows (parse errors)\n";
+		}
 		return 0;
 	} catch (const std::exception &e) {
 		std::cerr << "Error: " << e.what() << "\n";
