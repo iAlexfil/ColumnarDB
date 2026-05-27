@@ -571,14 +571,20 @@ namespace {
 	//      Note: projecting subset of columns for demonstration
 	Plan Q23(columnar::ColumnarReader &rdr) {
 		Plan p;
-		AddScan(p, rdr, {"WatchID", "EventTime", "URL", "Title"});
+		AddOp(p, std::make_unique<exec::Scan>(rdr));
 		AddFilter(p, Like(C(p, "URL"), "%google%"));
 		AddTopK(p, SortKeys(SK{C(p, "EventTime"), true}), 10);
-		AddProject(p, Cols(
-			           KV{"WatchID", C(p, "WatchID")},
-			           KV{"EventTime", C(p, "EventTime")},
-			           KV{"URL", C(p, "URL")},
-			           KV{"Title", C(p, "Title")}));
+		std::vector<KV> outs;
+		const auto &sch = rdr.GetSchema();
+		outs.reserve(sch.size());
+		for (const auto &col : sch) {
+			outs.emplace_back(col.name, C(p, col.name));
+		}
+		AddProject(p, std::move(outs));
+		p.format_hints["EventTime"] = DataType::DateTime;
+		p.format_hints["EventDate"] = DataType::Date;
+		p.format_hints["ClientEventTime"] = DataType::DateTime;
+		p.format_hints["LocalEventTime"] = DataType::DateTime;
 		return p;
 	}
 

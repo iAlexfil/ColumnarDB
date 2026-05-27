@@ -10,6 +10,9 @@
 #include <unordered_set>
 #include <variant>
 
+#include <ext/pb_ds/assoc_container.hpp>
+#include <ext/pb_ds/hash_policy.hpp>
+
 namespace exec {
 
 using KeyVal = std::variant<std::int64_t, std::uint64_t, double, std::string, std::uint8_t>;
@@ -265,7 +268,7 @@ HashAggregate::HashAggregate(Operator &child,
 HashAggregate::~HashAggregate() = default;
 
 void HashAggregate::Consume() {
-	std::unordered_map<GroupKey, std::uint32_t, GroupKeyHash> map;
+	__gnu_pbds::gp_hash_table<GroupKey, std::uint32_t, GroupKeyHash> map;
 	std::vector<std::uint32_t> gids;
 	std::uint32_t num_groups = 0;
 
@@ -287,7 +290,7 @@ void HashAggregate::Consume() {
 			std::uint32_t gid;
 			if (it == map.end()) {
 				gid = num_groups++;
-				map.emplace(std::move(k), gid);
+				map.insert({std::move(k), gid});
 				for (auto &a : aggs_) a->EnsureGroups(num_groups);
 			} else {
 				gid = it->second;
@@ -349,7 +352,7 @@ void AppendIntAs(DataVector &slot, std::int64_t v) {
 }
 
 void HashAggregate::ConsumeFast() {
-	std::unordered_map<FastKey, std::uint32_t, FastKeyHash> map;
+	__gnu_pbds::gp_hash_table<FastKey, std::uint32_t, FastKeyHash> map;
 	std::vector<std::uint32_t> gids;
 	std::uint32_t num_groups = 0;
 	const std::size_t nkeys = key_types_.size();
@@ -373,7 +376,7 @@ void HashAggregate::ConsumeFast() {
 			std::uint32_t gid;
 			if (it == map.end()) {
 				gid = num_groups++;
-				map.emplace(k, gid);
+				map.insert({k, gid});
 				for (auto &a : aggs_) a->EnsureGroups(num_groups);
 			} else {
 				gid = it->second;
