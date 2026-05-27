@@ -12,19 +12,21 @@
 class Batch;
 
 namespace columnar {
-
 	class ColumnarWriter {
 	public:
-		ColumnarWriter(const std::filesystem::path& path, const Schema& schema);
+		ColumnarWriter(const std::filesystem::path &path, const Schema &schema);
+
 		~ColumnarWriter();
 
-		ColumnarWriter(const ColumnarWriter&) = delete;
-		ColumnarWriter& operator=(const ColumnarWriter&) = delete;
+		ColumnarWriter(const ColumnarWriter &) = delete;
 
-		void WriteBatch(const Batch& batch);
+		ColumnarWriter &operator=(const ColumnarWriter &) = delete;
+
+		void WriteBatch(const Batch &batch);
+
 		void Finish();
 
-		const Schema& GetSchema() const { return schema_; }
+		const Schema &GetSchema() const { return schema_; }
 
 	private:
 		std::ofstream out_;
@@ -33,8 +35,9 @@ namespace columnar {
 		bool finalized_ = false;
 
 		void WriteHeader();
+
 		void WriteFooter(std::uint64_t footer_offset);
+
 		void PatchFooterOffset(std::uint64_t footer_offset);
 	};
-
 }

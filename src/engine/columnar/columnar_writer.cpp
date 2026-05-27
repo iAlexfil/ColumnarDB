@@ -87,22 +87,34 @@ namespace columnar {
 			};
 
 			switch (col_schema.type) {
-				case DataType::Int8:     writeFixed(std::get<std::vector<std::int8_t>>(column)); break;
-				case DataType::Int16:    writeFixed(std::get<std::vector<std::int16_t>>(column)); break;
-				case DataType::Int32:    writeFixed(std::get<std::vector<std::int32_t>>(column)); break;
-				case DataType::Int64:    writeFixed(std::get<std::vector<std::int64_t>>(column)); break;
-				case DataType::UInt8:    writeFixed(std::get<std::vector<std::uint8_t>>(column)); break;
-				case DataType::UInt16:   writeFixed(std::get<std::vector<std::uint16_t>>(column)); break;
-				case DataType::UInt32:   writeFixed(std::get<std::vector<std::uint32_t>>(column)); break;
-				case DataType::UInt64:   writeFixed(std::get<std::vector<std::uint64_t>>(column)); break;
-				case DataType::Float32:  writeFixed(std::get<std::vector<float>>(column)); break;
-				case DataType::Float64:  writeFixed(std::get<std::vector<double>>(column)); break;
-				case DataType::Date:     writeFixed(std::get<std::vector<std::int32_t>>(column)); break;
-				case DataType::DateTime: writeFixed(std::get<std::vector<std::int64_t>>(column)); break;
+				case DataType::Int8: writeFixed(std::get<std::vector<std::int8_t> >(column));
+					break;
+				case DataType::Int16: writeFixed(std::get<std::vector<std::int16_t> >(column));
+					break;
+				case DataType::Int32: writeFixed(std::get<std::vector<std::int32_t> >(column));
+					break;
+				case DataType::Int64: writeFixed(std::get<std::vector<std::int64_t> >(column));
+					break;
+				case DataType::UInt8: writeFixed(std::get<std::vector<std::uint8_t> >(column));
+					break;
+				case DataType::UInt16: writeFixed(std::get<std::vector<std::uint16_t> >(column));
+					break;
+				case DataType::UInt32: writeFixed(std::get<std::vector<std::uint32_t> >(column));
+					break;
+				case DataType::UInt64: writeFixed(std::get<std::vector<std::uint64_t> >(column));
+					break;
+				case DataType::Float32: writeFixed(std::get<std::vector<float> >(column));
+					break;
+				case DataType::Float64: writeFixed(std::get<std::vector<double> >(column));
+					break;
+				case DataType::Date: writeFixed(std::get<std::vector<std::int32_t> >(column));
+					break;
+				case DataType::DateTime: writeFixed(std::get<std::vector<std::int64_t> >(column));
+					break;
 				case DataType::String: {
-					const auto &vec = std::get<std::vector<std::string>>(column);
-					for (const auto &s : vec) WriteObj(out_, static_cast<std::uint32_t>(s.size()));
-					for (const auto &s : vec) { if (!s.empty()) WriteBytes(out_, s.data(), s.size()); }
+					const auto &vec = std::get<std::vector<std::string> >(column);
+					for (const auto &s: vec) WriteObj(out_, static_cast<std::uint32_t>(s.size()));
+					for (const auto &s: vec) { if (!s.empty()) WriteBytes(out_, s.data(), s.size()); }
 					break;
 				}
 				default:

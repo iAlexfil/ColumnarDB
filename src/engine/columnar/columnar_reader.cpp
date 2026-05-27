@@ -13,42 +13,40 @@
 #include "columnar_format.h"
 
 namespace {
-
-template<class T>
-T ReadAt(const std::uint8_t *base, std::size_t off) {
-	T v;
-	std::memcpy(&v, base + off, sizeof(T));
-	return v;
-}
-
-std::string ReadStringAt(const std::uint8_t *base, std::size_t &off) {
-	const auto len = ReadAt<std::uint32_t>(base, off);
-	off += sizeof(std::uint32_t);
-	std::string s(reinterpret_cast<const char*>(base + off), len);
-	off += len;
-	return s;
-}
-
-DataType ToDataType(std::uint8_t raw) {
-	switch (static_cast<DataType>(raw)) {
-		case DataType::Int8:
-		case DataType::Int16:
-		case DataType::Int32:
-		case DataType::Int64:
-		case DataType::UInt8:
-		case DataType::UInt16:
-		case DataType::UInt32:
-		case DataType::UInt64:
-		case DataType::Float32:
-		case DataType::Float64:
-		case DataType::String:
-		case DataType::Date:
-		case DataType::DateTime:
-			return static_cast<DataType>(raw);
+	template<class T>
+	T ReadAt(const std::uint8_t *base, std::size_t off) {
+		T v;
+		std::memcpy(&v, base + off, sizeof(T));
+		return v;
 	}
-	throw std::runtime_error("unknown DataType");
-}
 
+	std::string ReadStringAt(const std::uint8_t *base, std::size_t &off) {
+		const auto len = ReadAt<std::uint32_t>(base, off);
+		off += sizeof(std::uint32_t);
+		std::string s(reinterpret_cast<const char *>(base + off), len);
+		off += len;
+		return s;
+	}
+
+	DataType ToDataType(std::uint8_t raw) {
+		switch (static_cast<DataType>(raw)) {
+			case DataType::Int8:
+			case DataType::Int16:
+			case DataType::Int32:
+			case DataType::Int64:
+			case DataType::UInt8:
+			case DataType::UInt16:
+			case DataType::UInt32:
+			case DataType::UInt64:
+			case DataType::Float32:
+			case DataType::Float64:
+			case DataType::String:
+			case DataType::Date:
+			case DataType::DateTime:
+				return static_cast<DataType>(raw);
+		}
+		throw std::runtime_error("unknown DataType");
+	}
 }
 
 namespace columnar {
@@ -72,7 +70,7 @@ namespace columnar {
 			fd_ = -1;
 			throw std::runtime_error("columnar: mmap failed");
 		}
-		mapped_ = static_cast<const std::uint8_t*>(m);
+		mapped_ = static_cast<const std::uint8_t *>(m);
 
 		ReadHeader();
 		ReadFooter();
@@ -82,7 +80,7 @@ namespace columnar {
 	                              const std::vector<std::size_t> &col_indices) const {
 		if (batch_idx >= batches_.size() || fd_ < 0) return;
 		const auto &meta = batches_[batch_idx];
-		for (auto c : col_indices) {
+		for (auto c: col_indices) {
 			if (c >= meta.columns.size()) continue;
 			const auto &ch = meta.columns[c];
 			if (ch.size == 0) continue;
@@ -92,7 +90,7 @@ namespace columnar {
 
 	ColumnarReader::~ColumnarReader() {
 		if (mapped_) {
-			::munmap(const_cast<std::uint8_t*>(mapped_), mapped_size_);
+			::munmap(const_cast<std::uint8_t *>(mapped_), mapped_size_);
 			mapped_ = nullptr;
 		}
 		if (fd_ >= 0) {
@@ -103,7 +101,7 @@ namespace columnar {
 
 	void ColumnarReader::ReadHeader() {
 		if (mapped_size_ < 16) throw std::runtime_error("columnar: file too small");
-		const char *magic = reinterpret_cast<const char*>(mapped_);
+		const char *magic = reinterpret_cast<const char *>(mapped_);
 		if (!(magic[0] == 'C' && magic[1] == 'D' && magic[2] == 'B' && magic[3] == '1')) {
 			throw std::runtime_error("columnar: bad format file");
 		}
@@ -171,26 +169,38 @@ namespace columnar {
 		};
 
 		switch (cs.type) {
-			case DataType::Int8:     readFixed(std::get<std::vector<std::int8_t>>(dst)); return;
-			case DataType::Int16:    readFixed(std::get<std::vector<std::int16_t>>(dst)); return;
-			case DataType::Int32:    readFixed(std::get<std::vector<std::int32_t>>(dst)); return;
-			case DataType::Int64:    readFixed(std::get<std::vector<std::int64_t>>(dst)); return;
-			case DataType::UInt8:    readFixed(std::get<std::vector<std::uint8_t>>(dst)); return;
-			case DataType::UInt16:   readFixed(std::get<std::vector<std::uint16_t>>(dst)); return;
-			case DataType::UInt32:   readFixed(std::get<std::vector<std::uint32_t>>(dst)); return;
-			case DataType::UInt64:   readFixed(std::get<std::vector<std::uint64_t>>(dst)); return;
-			case DataType::Float32:  readFixed(std::get<std::vector<float>>(dst)); return;
-			case DataType::Float64:  readFixed(std::get<std::vector<double>>(dst)); return;
-			case DataType::Date:     readFixed(std::get<std::vector<std::int32_t>>(dst)); return;
-			case DataType::DateTime: readFixed(std::get<std::vector<std::int64_t>>(dst)); return;
+			case DataType::Int8: readFixed(std::get<std::vector<std::int8_t> >(dst));
+				return;
+			case DataType::Int16: readFixed(std::get<std::vector<std::int16_t> >(dst));
+				return;
+			case DataType::Int32: readFixed(std::get<std::vector<std::int32_t> >(dst));
+				return;
+			case DataType::Int64: readFixed(std::get<std::vector<std::int64_t> >(dst));
+				return;
+			case DataType::UInt8: readFixed(std::get<std::vector<std::uint8_t> >(dst));
+				return;
+			case DataType::UInt16: readFixed(std::get<std::vector<std::uint16_t> >(dst));
+				return;
+			case DataType::UInt32: readFixed(std::get<std::vector<std::uint32_t> >(dst));
+				return;
+			case DataType::UInt64: readFixed(std::get<std::vector<std::uint64_t> >(dst));
+				return;
+			case DataType::Float32: readFixed(std::get<std::vector<float> >(dst));
+				return;
+			case DataType::Float64: readFixed(std::get<std::vector<double> >(dst));
+				return;
+			case DataType::Date: readFixed(std::get<std::vector<std::int32_t> >(dst));
+				return;
+			case DataType::DateTime: readFixed(std::get<std::vector<std::int64_t> >(dst));
+				return;
 			case DataType::String: {
-				auto &vec = std::get<std::vector<std::string>>(dst);
+				auto &vec = std::get<std::vector<std::string> >(dst);
 				vec.resize(nrows);
-				const std::uint32_t *lens = reinterpret_cast<const std::uint32_t*>(p);
+				const std::uint32_t *lens = reinterpret_cast<const std::uint32_t *>(p);
 				const std::uint8_t *data = p + nrows * sizeof(std::uint32_t);
 				std::size_t off = 0;
 				for (std::size_t i = 0; i < nrows; ++i) {
-					vec[i].assign(reinterpret_cast<const char*>(data + off), lens[i]);
+					vec[i].assign(reinterpret_cast<const char *>(data + off), lens[i]);
 					off += lens[i];
 				}
 				return;
@@ -206,7 +216,7 @@ namespace columnar {
 		}
 		Schema sub;
 		sub.reserve(col_indices.size());
-		for (auto c : col_indices) {
+		for (auto c: col_indices) {
 			if (c >= schema_.size()) throw std::runtime_error("columnar: projection column index out of range");
 			sub.push_back(schema_[c]);
 		}

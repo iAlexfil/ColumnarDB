@@ -5,3 +5,5 @@ hits_sample.csv
 hits_scheme_out.csv
 is_same_csv.py
 .venv
+.idea
+bench_hits/data.csv

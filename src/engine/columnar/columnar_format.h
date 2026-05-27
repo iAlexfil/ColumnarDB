@@ -4,7 +4,6 @@
 #include <vector>
 
 namespace columnar {
-
 	static constexpr std::uint32_t kColumnarVersion = 1;
 
 	struct ChunkMeta {
@@ -16,5 +15,4 @@ namespace columnar {
 		std::uint32_t row_count = 0;
 		std::vector<ChunkMeta> columns;
 	};
-
 }

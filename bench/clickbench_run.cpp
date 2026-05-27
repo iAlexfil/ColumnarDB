@@ -69,7 +69,7 @@ namespace {
 
 	void AppendTiebreakers(Plan &p, std::vector<std::pair<ExprPtr, bool> > &keys) {
 		const auto &sch = p.root->OutputSchema();
-		for (const auto &col : sch) {
+		for (const auto &col: sch) {
 			keys.emplace_back(exec::MakeColumnByName(sch, col.name), true);
 		}
 	}
@@ -85,7 +85,7 @@ namespace {
 	}
 
 	void AddSortLimitOffset(Plan &p, std::vector<std::pair<ExprPtr, bool> > keys,
-	                         std::size_t limit, std::size_t offset) {
+	                        std::size_t limit, std::size_t offset) {
 		AppendTiebreakers(p, keys);
 		AddOp(p, std::make_unique<exec::Sort>(*p.root, std::move(keys), limit, offset));
 	}
@@ -577,7 +577,7 @@ namespace {
 		std::vector<KV> outs;
 		const auto &sch = rdr.GetSchema();
 		outs.reserve(sch.size());
-		for (const auto &col : sch) {
+		for (const auto &col: sch) {
 			outs.emplace_back(col.name, C(p, col.name));
 		}
 		AddProject(p, std::move(outs));
@@ -1032,7 +1032,7 @@ namespace {
 
 	void WriteQuotedString(std::ostream &out, const std::string &s) {
 		out.put('"');
-		for (char c : s) {
+		for (char c: s) {
 			if (c == '"') out.put('"');
 			out.put(c);
 		}
@@ -1113,7 +1113,7 @@ int main(int argc, char **argv) {
 			if (i + 1 >= argc) throw std::runtime_error("missing value for " + a);
 			return argv[++i];
 		};
-		if (a == "--input")       input = next();
+		if (a == "--input") input = next();
 		else if (a == "--schema") schema = next();
 		else if (a == "--output_dir") output_dir = next();
 		else if (a.rfind("--queries=", 0) == 0) queries_filter = a.substr(10);
@@ -1126,8 +1126,8 @@ int main(int argc, char **argv) {
 
 	if (input.empty() || output_dir.empty()) {
 		std::cerr << "Usage: " << argv[0]
-		          << " --input <hits.columnar> --output_dir <dir>"
-		             " [--schema <hits.schema>] [--queries N]\n";
+				<< " --input <hits.columnar> --output_dir <dir>"
+				" [--schema <hits.schema>] [--queries N]\n";
 		return 1;
 	}
 
@@ -1145,10 +1145,10 @@ int main(int argc, char **argv) {
 		fs::create_directories(output_dir);
 
 		std::cout << "file=" << input
-		          << " columns=" << rdr.GetSchema().size()
-		          << " batches=" << rdr.NumBatches() << "\n\n";
+				<< " columns=" << rdr.GetSchema().size()
+				<< " batches=" << rdr.NumBatches() << "\n\n";
 
-		for (const auto &q : kQueries) {
+		for (const auto &q: kQueries) {
 			if (!only_queries.empty() && !only_queries.count(q.index)) continue;
 
 			const auto t0 = std::chrono::steady_clock::now();
@@ -1160,7 +1160,7 @@ int main(int argc, char **argv) {
 				const double secs = std::chrono::duration<double>(
 					std::chrono::steady_clock::now() - t0).count();
 				std::cout << "[Q" << q.index << "] " << std::fixed << std::setprecision(3)
-				          << secs << "s OK -> " << csv_path.filename().string() << "\n";
+						<< secs << "s OK -> " << csv_path.filename().string() << "\n";
 			} catch (const std::exception &e) {
 				std::cout << "[Q" << q.index << "] FAIL: " << e.what() << "\n";
 			}
