@@ -137,7 +137,11 @@ namespace exec {
 				for (std::size_t i = 0; i < sch.size(); ++i) {
 					std::visit([&](const auto &x) {
 						using T = std::decay_t<decltype(x)>;
-						std::get<std::vector<T> >(result_->GetColumn(i)).push_back(x);
+						if constexpr (std::is_same_v<T, std::string>) {
+							std::get<DictColumn>(result_->GetColumn(i)).push_back(x);
+						} else {
+							std::get<std::vector<T>>(result_->GetColumn(i)).push_back(x);
+						}
 					}, c.row[i]);
 				}
 			}

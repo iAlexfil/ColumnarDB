@@ -52,7 +52,7 @@ void WriteSampleFile(const fs::path &p,
 		batch.Reserve(take);
 		auto &va = std::get<std::vector<std::int32_t>>(batch.GetColumn(0));
 		auto &vb = std::get<std::vector<std::int64_t>>(batch.GetColumn(1));
-		auto &vc = std::get<std::vector<std::string>>(batch.GetColumn(2));
+		auto &vc = std::get<DictColumn>(batch.GetColumn(2));
 		for (std::size_t k = 0; k < take; ++k) {
 			va.push_back(a[i + k]);
 			vb.push_back(b[i + k]);
@@ -216,7 +216,7 @@ TEST(ExecScan, ProjectionByIndex) {
 	auto eb = scan.Next();
 	ASSERT_TRUE(eb.has_value());
 	EXPECT_EQ(eb->batch->ColCount(), 2u);
-	const auto &c = std::get<std::vector<std::string>>(eb->batch->GetColumn(0));
+	const auto &c = std::get<DictColumn>(eb->batch->GetColumn(0));
 	const auto &a = std::get<std::vector<std::int32_t>>(eb->batch->GetColumn(1));
 	EXPECT_EQ(c, (std::vector<std::string>{"a","b","c"}));
 	EXPECT_EQ(a, (std::vector<std::int32_t>{1,2,3}));

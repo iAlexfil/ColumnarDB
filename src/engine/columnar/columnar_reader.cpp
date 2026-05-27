@@ -144,6 +144,8 @@ namespace columnar {
 				off += sizeof(std::uint64_t);
 				meta.columns[c].size = ReadAt<std::uint64_t>(mapped_, off);
 				off += sizeof(std::uint64_t);
+				meta.columns[c].encoding = static_cast<Encoding>(ReadAt<std::uint8_t>(mapped_, off));
+				off += sizeof(std::uint8_t);
 			}
 			batches_.push_back(std::move(meta));
 		}
@@ -194,14 +196,29 @@ namespace columnar {
 			case DataType::DateTime: readFixed(std::get<std::vector<std::int64_t> >(dst));
 				return;
 			case DataType::String: {
-				auto &vec = std::get<std::vector<std::string> >(dst);
-				vec.resize(nrows);
-				const std::uint32_t *lens = reinterpret_cast<const std::uint32_t *>(p);
-				const std::uint8_t *data = p + nrows * sizeof(std::uint32_t);
-				std::size_t off = 0;
-				for (std::size_t i = 0; i < nrows; ++i) {
-					vec[i].assign(reinterpret_cast<const char *>(data + off), lens[i]);
-					off += lens[i];
+				auto &dc = std::get<DictColumn>(dst);
+				dc.clear();
+				if (ch.encoding == Encoding::Dict) {
+					std::size_t off = 0;
+					const auto dict_size = ReadAt<std::uint32_t>(p, off);
+					off += sizeof(std::uint32_t);
+					std::vector<std::string> dict(dict_size);
+					for (std::uint32_t d = 0; d < dict_size; ++d) {
+						const auto slen = ReadAt<std::uint32_t>(p, off);
+						off += sizeof(std::uint32_t);
+						dict[d].assign(reinterpret_cast<const char*>(p + off), slen);
+						off += slen;
+					}
+					dc.load_dict(std::move(dict), p + off, nrows);
+				} else {
+					dc.reserve(nrows);
+					const std::uint32_t *lens = reinterpret_cast<const std::uint32_t *>(p);
+					const std::uint8_t *data = p + nrows * sizeof(std::uint32_t);
+					std::size_t off = 0;
+					for (std::size_t i = 0; i < nrows; ++i) {
+						dc.push_back(std::string(reinterpret_cast<const char *>(data + off), lens[i]));
+						off += lens[i];
+					}
 				}
 				return;
 			}

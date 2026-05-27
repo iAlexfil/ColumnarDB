@@ -25,7 +25,7 @@ namespace exec {
 					using V = std::decay_t<decltype(dv)>;
 					const auto &sv = std::get<V>(src.GetColumn(c));
 					if (sel == nullptr) {
-						dv.insert(dv.end(), sv.begin(), sv.end());
+						for (std::size_t i = 0; i < sv.size(); ++i) dv.push_back(sv[i]);
 					} else {
 						dv.reserve(dv.size() + sel->size());
 						for (std::uint32_t i: *sel) dv.push_back(sv[i]);
@@ -48,11 +48,18 @@ namespace exec {
 		                           DataVector &dst) {
 			std::visit([&](const auto &v) {
 				using V = std::decay_t<decltype(v)>;
-				using T = typename V::value_type;
-				std::vector<T> out;
-				out.reserve(idx.size());
-				for (auto p: idx) out.push_back(v[p]);
-				dst.template emplace<std::vector<T> >(std::move(out));
+				if constexpr (std::is_same_v<V, DictColumn>) {
+					DictColumn dc;
+					dc.reserve(idx.size());
+					for (auto p : idx) dc.push_back(v[p]);
+					dst.template emplace<DictColumn>(std::move(dc));
+				} else {
+					using T = typename V::value_type;
+					std::vector<T> out;
+					out.reserve(idx.size());
+					for (auto p: idx) out.push_back(v[p]);
+					dst.template emplace<std::vector<T>>(std::move(out));
+				}
 			}, src);
 		}
 	}

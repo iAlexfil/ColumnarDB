@@ -11,6 +11,8 @@
 #include <string>
 #include <string_view>
 
+#include "engine/batch/dict_column.h"
+
 
 namespace utils {
 	template<class IsSpace>
@@ -58,7 +60,7 @@ using DataVector = std::variant<
 	std::vector<std::uint8_t>, std::vector<std::uint16_t>,
 	std::vector<std::uint32_t>, std::vector<std::uint64_t>,
 	std::vector<float>, std::vector<double>,
-	std::vector<std::string>
+	DictColumn
 >;
 
 namespace utils {

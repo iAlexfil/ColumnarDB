@@ -33,7 +33,7 @@ Batch::Batch(Schema schema)
 				break;
 			case DataType::Float64: columns_.emplace_back(std::vector<double>{});
 				break;
-			case DataType::String: columns_.emplace_back(std::vector<std::string>{});
+			case DataType::String: columns_.emplace_back(DictColumn{});
 				break;
 			case DataType::Date: columns_.emplace_back(std::vector<std::int32_t>{});
 				break;

@@ -7,13 +7,14 @@
 template<class Key, class Hash>
 class HashMap {
 	static constexpr std::uint32_t kEmpty = UINT32_MAX;
+
 public:
 	HashMap() : mask_(15), size_(0) {
 		slots_.resize(16);
 		vals_.resize(16, kEmpty);
 	}
 
-	std::uint32_t* find(const Key &k) {
+	std::uint32_t *find(const Key &k) {
 		std::size_t h = hash_(k);
 		for (std::size_t step = 0; ; ++step) {
 			std::size_t idx = (h + step * (step + 1) / 2) & mask_;

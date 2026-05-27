@@ -73,7 +73,7 @@ static DataVector MakeEmptyColumn(DataType t) {
         case DataType::UInt64:   return std::vector<std::uint64_t>{};
         case DataType::Float32:  return std::vector<float>{};
         case DataType::Float64:  return std::vector<double>{};
-        case DataType::String:   return std::vector<std::string>{};
+        case DataType::String:   return DictColumn{};
         case DataType::Date:     return std::vector<std::int32_t>{};
         case DataType::DateTime: return std::vector<std::int64_t>{};
     }
@@ -97,7 +97,7 @@ static FlatTable FlattenBatches(const Schema& schema, const std::vector<Batch>& 
             std::visit([&](auto &out) {
                 using V = std::decay_t<decltype(out)>;
                 const auto &src = std::get<V>(b.GetColumn(c));
-                out.insert(out.end(), src.begin(), src.end());
+                for (std::size_t i = 0; i < src.size(); ++i) out.push_back(src[i]);
             }, t.columns[c]);
         }
     }
@@ -162,8 +162,8 @@ static void ExpectTablesEqual(const FlatTable& a, const FlatTable& b) {
                       std::get<std::vector<std::int64_t>>(b.columns[c]))
                 << "Int64 column mismatch at " << c;
         } else {
-            EXPECT_EQ(std::get<std::vector<std::string>>(a.columns[c]),
-                      std::get<std::vector<std::string>>(b.columns[c]))
+            EXPECT_EQ(std::get<DictColumn>(a.columns[c]),
+                      std::get<DictColumn>(b.columns[c]))
                 << "String column mismatch at " << c;
         }
     }
@@ -196,7 +196,7 @@ static void ExportColumnarToCsv(const fs::path& col_path,
                 if (cs.type == DataType::Int64) {
                     row[c] = std::to_string(std::get<std::vector<std::int64_t>>(col)[r]);
                 } else {
-                    row[c] = std::get<std::vector<std::string>>(col)[r];
+                    row[c] = std::get<DictColumn>(col)[r];
                 }
             }
             ASSERT_TRUE(w.WriteNext(row));

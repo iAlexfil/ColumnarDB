@@ -112,9 +112,19 @@ namespace columnar {
 				case DataType::DateTime: writeFixed(std::get<std::vector<std::int64_t> >(column));
 					break;
 				case DataType::String: {
-					const auto &vec = std::get<std::vector<std::string> >(column);
-					for (const auto &s: vec) WriteObj(out_, static_cast<std::uint32_t>(s.size()));
-					for (const auto &s: vec) { if (!s.empty()) WriteBytes(out_, s.data(), s.size()); }
+					const auto &dc = std::get<DictColumn>(column);
+					const auto &dict = dc.dictionary();
+					const auto &codes = dc.codes();
+					const auto dict_size = static_cast<std::uint32_t>(dict.size());
+					WriteObj(out_, dict_size);
+					for (const auto &s : dict) {
+						WriteObj(out_, static_cast<std::uint32_t>(s.size()));
+						if (!s.empty()) WriteBytes(out_, s.data(), s.size());
+					}
+					if (!codes.empty()) {
+						WriteBytes(out_, codes.data(), codes.size() * sizeof(std::uint32_t));
+					}
+					rg.columns[col].encoding = columnar::Encoding::Dict;
 					break;
 				}
 				default:
@@ -152,6 +162,7 @@ namespace columnar {
 			for (const auto &ch: rg.columns) {
 				WriteObj(out_, ch.offset);
 				WriteObj(out_, ch.size);
+				WriteObj(out_, static_cast<std::uint8_t>(ch.encoding));
 			}
 		}
 	}

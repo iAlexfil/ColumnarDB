@@ -61,10 +61,11 @@ namespace exec::detail {
 	}
 
 	inline EvalCol GatherString(const DataVector &col, const std::vector<std::uint32_t> *sel) {
-		const auto &src = std::get<std::vector<std::string> >(col);
+		const auto &src = std::get<DictColumn>(col);
 		std::vector<std::string> out;
 		if (sel == nullptr) {
-			out = src;
+			out.reserve(src.size());
+			for (std::size_t i = 0; i < src.size(); ++i) out.push_back(src[i]);
 		} else {
 			out.reserve(sel->size());
 			for (auto i: *sel) out.push_back(src[i]);

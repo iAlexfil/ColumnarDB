@@ -40,7 +40,13 @@ namespace exec {
 				auto &slot = buf_->GetColumn(i);
 				std::visit([&](auto &&v) {
 					using T = std::decay_t<decltype(v)>;
-					slot.emplace<T>(std::move(v));
+					if constexpr (std::is_same_v<T, std::vector<std::string>>) {
+						DictColumn dc;
+						for (auto &s : v) dc.push_back(std::move(s));
+						slot.emplace<DictColumn>(std::move(dc));
+					} else {
+						slot.emplace<T>(std::move(v));
+					}
 				}, c);
 			}
 			buf_->SetRowCount(ctx.rows());

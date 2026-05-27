@@ -73,7 +73,11 @@ namespace exec {
 		void AppendKey(DataVector &slot, const KeyVal &kv) {
 			std::visit([&](const auto &x) {
 				using T = std::decay_t<decltype(x)>;
-				std::get<std::vector<T> >(slot).push_back(x);
+				if constexpr (std::is_same_v<T, std::string>) {
+					std::get<DictColumn>(slot).push_back(x);
+				} else {
+					std::get<std::vector<T>>(slot).push_back(x);
+				}
 			}, kv);
 		}
 	}
@@ -167,7 +171,15 @@ namespace exec {
 				}
 			}
 
-			void EmitInto(DataVector &slot) override { slot.emplace<std::vector<T> >(std::move(values_)); }
+			void EmitInto(DataVector &slot) override {
+				if constexpr (std::is_same_v<T, std::string>) {
+					DictColumn dc;
+					for (auto &s : values_) dc.push_back(std::move(s));
+					slot.emplace<DictColumn>(std::move(dc));
+				} else {
+					slot.emplace<std::vector<T>>(std::move(values_));
+				}
+			}
 
 			DataType OutputType() const override {
 				if constexpr (std::is_same_v<T, std::int64_t>) return DataType::Int64;
@@ -453,7 +465,7 @@ namespace exec {
 			const FastKeyN<N> &fk = *sorted_keys[gid];
 			for (std::size_t i = 0; i < N; ++i) {
 				if (key_types_[i] == EvalType::Str) {
-					std::get<std::vector<std::string>>(result_->GetColumn(i))
+					std::get<DictColumn>(result_->GetColumn(i))
 						.push_back(GetInternedString(static_cast<std::uint32_t>(fk.data[i])));
 				} else {
 					std::visit([v = fk.data[i]](auto &vec) {
