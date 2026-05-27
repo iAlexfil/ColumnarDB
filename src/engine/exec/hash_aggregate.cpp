@@ -261,11 +261,20 @@ HashAggregate::HashAggregate(Operator &child,
 
 	use_fast_ = key_types_.size() <= kMaxFastKeys;
 	for (EvalType t : key_types_) {
-		if (t == EvalType::Str || t == EvalType::F64) { use_fast_ = false; break; }
+		if (t == EvalType::F64) { use_fast_ = false; break; }
 	}
 }
 
 HashAggregate::~HashAggregate() = default;
+
+std::uint32_t HashAggregate::InternString(std::string_view s) {
+	auto it = str_index_.find(s);
+	if (it != str_index_.end()) return it->second;
+	str_pool_.emplace_back(s);
+	std::uint32_t id = static_cast<std::uint32_t>(str_pool_.size() - 1);
+	str_index_.emplace(std::string_view(str_pool_.back()), id);
+	return id;
+}
 
 void HashAggregate::Consume() {
 	__gnu_pbds::gp_hash_table<GroupKey, std::uint32_t, GroupKeyHash> map;
@@ -331,26 +340,6 @@ std::optional<ExecBatch> HashAggregate::Next() {
 	return std::nullopt;
 }
 
-namespace {
-
-std::int64_t ExtractKeyAsI64(const EvalCol &col, std::size_t row) {
-	return std::visit([row](const auto &v) -> std::int64_t {
-		using T = typename std::decay_t<decltype(v)>::value_type;
-		if constexpr (std::is_arithmetic_v<T>) return static_cast<std::int64_t>(v[row]);
-		else throw std::runtime_error("ExtractKeyAsI64: non-numeric column");
-	}, col);
-}
-
-void AppendIntAs(DataVector &slot, std::int64_t v) {
-	std::visit([v](auto &vec) {
-		using T = typename std::decay_t<decltype(vec)>::value_type;
-		if constexpr (std::is_integral_v<T>) vec.push_back(static_cast<T>(v));
-		else throw std::runtime_error("AppendIntAs: non-integer slot");
-	}, slot);
-}
-
-}
-
 void HashAggregate::ConsumeFast() {
 	__gnu_pbds::gp_hash_table<FastKey, std::uint32_t, FastKeyHash> map;
 	std::vector<std::uint32_t> gids;
@@ -369,7 +358,16 @@ void HashAggregate::ConsumeFast() {
 		for (std::size_t r = 0; r < n; ++r) {
 			FastKey k;
 			for (std::size_t i = 0; i < nkeys; ++i) {
-				k.data[i] = ExtractKeyAsI64(key_cols[i], r);
+				if (key_types_[i] == EvalType::Str) {
+					const auto &v = std::get<std::vector<std::string>>(key_cols[i]);
+					k.data[i] = static_cast<std::int64_t>(InternString(v[r]));
+				} else {
+					k.data[i] = std::visit([r](const auto &v) -> std::int64_t {
+						using T = typename std::decay_t<decltype(v)>::value_type;
+						if constexpr (std::is_arithmetic_v<T>) return static_cast<std::int64_t>(v[r]);
+						else throw std::runtime_error("ConsumeFast: unexpected non-numeric");
+					}, key_cols[i]);
+				}
 			}
 
 			auto it = map.find(k);
@@ -396,7 +394,16 @@ void HashAggregate::ConsumeFast() {
 	for (std::uint32_t gid = 0; gid < num_groups; ++gid) {
 		const FastKey &fk = *sorted_keys[gid];
 		for (std::size_t i = 0; i < nkeys; ++i) {
-			AppendIntAs(result_->GetColumn(i), fk.data[i]);
+			if (key_types_[i] == EvalType::Str) {
+				std::get<std::vector<std::string>>(result_->GetColumn(i))
+					.push_back(GetInternedString(static_cast<std::uint32_t>(fk.data[i])));
+			} else {
+				std::visit([v = fk.data[i]](auto &vec) {
+					using T = typename std::decay_t<decltype(vec)>::value_type;
+					if constexpr (std::is_integral_v<T>) vec.push_back(static_cast<T>(v));
+					else throw std::runtime_error("ConsumeFast emit: unexpected non-integer slot");
+				}, result_->GetColumn(i));
+			}
 		}
 	}
 	for (std::size_t i = 0; i < aggs_.size(); ++i) {

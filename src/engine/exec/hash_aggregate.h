@@ -1,8 +1,11 @@
 #pragma once
 
+#include <deque>
 #include <memory>
 #include <optional>
 #include <string>
+#include <string_view>
+#include <unordered_map>
 #include <utility>
 #include <vector>
 
@@ -44,6 +47,12 @@ private:
 	bool consumed_ = false;
 	bool use_fast_ = false;
 	std::unique_ptr<Batch> result_;
+
+	std::deque<std::string> str_pool_;
+	std::unordered_map<std::string_view, std::uint32_t> str_index_;
+
+	std::uint32_t InternString(std::string_view s);
+	const std::string &GetInternedString(std::uint32_t id) const { return str_pool_[id]; }
 
 	void Consume();
 	void ConsumeFast();
