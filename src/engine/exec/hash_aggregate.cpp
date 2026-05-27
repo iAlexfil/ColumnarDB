@@ -10,8 +10,8 @@
 #include <unordered_set>
 #include <variant>
 
-#include <ext/pb_ds/assoc_container.hpp>
-#include <ext/pb_ds/hash_policy.hpp>
+#include "utils/hash_map.h"
+
 
 namespace exec {
 	using KeyVal = std::variant<std::int64_t, std::uint64_t, double, std::string, std::uint8_t>;
@@ -33,11 +33,18 @@ namespace exec {
 			std::size_t operator()(const FastKeyN<N> &k) const noexcept {
 				std::size_t h = 1469598103934665603ULL;
 				for (std::size_t i = 0; i < N; ++i) {
-					h ^= std::hash<std::int64_t>{}(k.data[i]) + 0x9e3779b97f4a7c15ULL + (h << 6) + (h >> 2);
+					auto v = static_cast<std::uint64_t>(k.data[i]);
+					v ^= v >> 33;
+					v *= 0xff51afd7ed558ccdULL;
+					v ^= v >> 33;
+					v *= 0xc4ceb9fe1a85ec53ULL;
+					v ^= v >> 33;
+					h ^= v + 0x9e3779b97f4a7c15ULL + (h << 6) + (h >> 2);
 				}
 				return h;
 			}
 		};
+
 
 		struct GroupKey {
 			std::vector<KeyVal> v;
@@ -312,10 +319,7 @@ namespace exec {
 
 		use_fast_ = key_types_.size() <= kMaxFastKeys;
 		for (EvalType t: key_types_) {
-			if (t == EvalType::F64) {
-				use_fast_ = false;
-				break;
-			}
+			if (t == EvalType::F64) { use_fast_ = false; break; }
 		}
 	}
 
@@ -331,7 +335,7 @@ namespace exec {
 	}
 
 	void HashAggregate::Consume() {
-		__gnu_pbds::gp_hash_table<GroupKey, std::uint32_t, GroupKeyHash> map;
+		std::unordered_map<GroupKey, std::uint32_t, GroupKeyHash> map;
 		std::vector<std::uint32_t> gids;
 		std::uint32_t num_groups = 0;
 
@@ -395,101 +399,83 @@ namespace exec {
 	}
 
 	template<std::size_t N>
-	void ConsumeFastN(HashAggregate &agg,
-	                  Operator &child,
-	                  const std::vector<EvalType> &key_types,
-	                  const std::vector<ExprPtr> &key_exprs,
-	                  std::vector<std::unique_ptr<GroupAgg> > &aggs_vec,
-	                  const Schema &out_schema,
-	                  std::unique_ptr<Batch> &result_out,
-	                  std::function<std::uint32_t(std::string_view)> intern,
-	                  std::function<const std::string&(std::uint32_t)> get_str) {
-		__gnu_pbds::gp_hash_table<FastKeyN<N>, std::uint32_t, FastKeyNHash<N> > map;
+	void HashAggregate::ConsumeFastImpl() {
+		HashMap<FastKeyN<N>, FastKeyNHash<N>> map;
 		std::vector<std::uint32_t> gids;
 		std::uint32_t num_groups = 0;
 
-		while (auto eb = child.Next()) {
+		while (auto eb = child_.Next()) {
 			EvalContext ctx{eb->batch, eb->full_selection() ? nullptr : &eb->sel};
 
 			std::vector<EvalCol> key_cols;
 			key_cols.reserve(N);
-			for (const auto &e: key_exprs) key_cols.push_back(e->eval(ctx));
+			for (const auto &e: key_exprs_) key_cols.push_back(e->eval(ctx));
 
 			const std::size_t n = ctx.rows();
 			gids.assign(n, 0);
 			for (std::size_t r = 0; r < n; ++r) {
 				FastKeyN<N> k;
 				for (std::size_t i = 0; i < N; ++i) {
-					if (key_types[i] == EvalType::Str) {
-						const auto &v = std::get<std::vector<std::string> >(key_cols[i]);
-						k.data[i] = static_cast<std::int64_t>(intern(v[r]));
+					if (key_types_[i] == EvalType::Str) {
+						const auto &v = std::get<std::vector<std::string>>(key_cols[i]);
+						k.data[i] = static_cast<std::int64_t>(InternString(v[r]));
 					} else {
 						k.data[i] = std::visit([r](const auto &v) -> std::int64_t {
 							using T = typename std::decay_t<decltype(v)>::value_type;
 							if constexpr (std::is_arithmetic_v<T>) return static_cast<std::int64_t>(v[r]);
-							else throw std::runtime_error("ConsumeFastN: unexpected non-numeric");
+							else throw std::runtime_error("ConsumeFastImpl: unexpected non-numeric");
 						}, key_cols[i]);
 					}
 				}
 
-				auto it = map.find(k);
+				auto *ptr = map.find(k);
 				std::uint32_t gid;
-				if (it == map.end()) {
+				if (!ptr) {
 					gid = num_groups++;
-					map.insert({k, gid});
-					for (auto &a: aggs_vec) a->EnsureGroups(num_groups);
+					map.insert(k, gid);
+					for (auto &a: aggs_) a->EnsureGroups(num_groups);
 				} else {
-					gid = it->second;
+					gid = *ptr;
 				}
 				gids[r] = gid;
 			}
 
-			for (auto &a: aggs_vec) a->UpdateBatch(gids, ctx);
+			for (auto &a: aggs_) a->UpdateBatch(gids, ctx);
 		}
 
-		result_out = std::make_unique<Batch>(out_schema);
-		result_out->Reserve(num_groups);
+		result_ = std::make_unique<Batch>(out_schema_);
+		result_->Reserve(num_groups);
 
 		std::vector<const FastKeyN<N> *> sorted_keys(num_groups);
-		for (const auto &[k, gid]: map) sorted_keys[gid] = &k;
+		map.for_each([&](const FastKeyN<N> &k, std::uint32_t gid) { sorted_keys[gid] = &k; });
 
 		for (std::uint32_t gid = 0; gid < num_groups; ++gid) {
 			const FastKeyN<N> &fk = *sorted_keys[gid];
 			for (std::size_t i = 0; i < N; ++i) {
-				if (key_types[i] == EvalType::Str) {
-					std::get<std::vector<std::string> >(result_out->GetColumn(i))
-							.push_back(get_str(static_cast<std::uint32_t>(fk.data[i])));
+				if (key_types_[i] == EvalType::Str) {
+					std::get<std::vector<std::string>>(result_->GetColumn(i))
+						.push_back(GetInternedString(static_cast<std::uint32_t>(fk.data[i])));
 				} else {
 					std::visit([v = fk.data[i]](auto &vec) {
 						using T = typename std::decay_t<decltype(vec)>::value_type;
 						if constexpr (std::is_integral_v<T>) vec.push_back(static_cast<T>(v));
-						else throw std::runtime_error("ConsumeFastN emit: unexpected non-integer slot");
-					}, result_out->GetColumn(i));
+						else throw std::runtime_error("ConsumeFastImpl emit: unexpected non-integer slot");
+					}, result_->GetColumn(i));
 				}
 			}
 		}
-		for (std::size_t i = 0; i < aggs_vec.size(); ++i) {
-			aggs_vec[i]->EmitInto(result_out->GetColumn(N + i));
+		for (std::size_t i = 0; i < aggs_.size(); ++i) {
+			aggs_[i]->EmitInto(result_->GetColumn(N + i));
 		}
-		result_out->SetRowCount(num_groups);
+		result_->SetRowCount(num_groups);
 	}
 
 	void HashAggregate::ConsumeFast() {
-		auto intern = [this](std::string_view s) { return InternString(s); };
-		auto get_str = [this](std::uint32_t id) -> const std::string & { return GetInternedString(id); };
 		switch (key_types_.size()) {
-			case 1: ConsumeFastN<1>(*this, child_, key_types_, key_exprs_, aggs_, out_schema_, result_, intern,
-			                        get_str);
-				break;
-			case 2: ConsumeFastN<2>(*this, child_, key_types_, key_exprs_, aggs_, out_schema_, result_, intern,
-			                        get_str);
-				break;
-			case 3: ConsumeFastN<3>(*this, child_, key_types_, key_exprs_, aggs_, out_schema_, result_, intern,
-			                        get_str);
-				break;
-			case 4: ConsumeFastN<4>(*this, child_, key_types_, key_exprs_, aggs_, out_schema_, result_, intern,
-			                        get_str);
-				break;
+			case 1: ConsumeFastImpl<1>(); break;
+			case 2: ConsumeFastImpl<2>(); break;
+			case 3: ConsumeFastImpl<3>(); break;
+			case 4: ConsumeFastImpl<4>(); break;
 			default: throw std::runtime_error("ConsumeFast: unexpected key count");
 		}
 	}

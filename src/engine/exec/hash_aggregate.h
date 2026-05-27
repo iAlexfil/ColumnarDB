@@ -57,7 +57,7 @@ namespace exec {
 		const std::string &GetInternedString(std::uint32_t id) const { return str_pool_[id]; }
 
 		void Consume();
-
 		void ConsumeFast();
+		template<std::size_t N> void ConsumeFastImpl();
 	};
 }
