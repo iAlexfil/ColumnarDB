@@ -4,10 +4,11 @@
 #include <chrono>
 #include <climits>
 #include <cstdint>
-#include <regex>
 #include <stdexcept>
 #include <string>
 #include <variant>
+
+#include <re2/re2.h>
 
 namespace exec {
 	namespace {
@@ -143,24 +144,6 @@ namespace exec {
 			return out;
 		}
 
-		std::string ConvertBackslashToEcma(const std::string &s) {
-			std::string out;
-			out.reserve(s.size());
-			for (std::size_t i = 0; i < s.size(); ++i) {
-				if (s[i] == '\\' && i + 1 < s.size() && s[i + 1] >= '0' && s[i + 1] <= '9') {
-					out.push_back('$');
-					out.push_back(s[i + 1]);
-					++i;
-				} else if (s[i] == '$') {
-					out.push_back('$');
-					out.push_back('$');
-				} else {
-					out.push_back(s[i]);
-				}
-			}
-			return out;
-		}
-
 		EvalCol FnRegexpReplace(const std::vector<EvalCol> &args, std::size_t n) {
 			const auto &s = GetStr(args[0]);
 			const auto &p = GetStr(args[1]);
@@ -169,14 +152,17 @@ namespace exec {
 			if (p.empty()) return out;
 
 			if (AllSame(p) && AllSame(r)) {
-				std::regex re(p[0]);
-				std::string ecma_repl = ConvertBackslashToEcma(r[0]);
-				for (std::size_t i = 0; i < n; ++i) out[i] = std::regex_replace(s[i], re, ecma_repl);
+				RE2 re(p[0]);
+				const std::string &repl = r[0];
+				for (std::size_t i = 0; i < n; ++i) {
+					out[i] = s[i];
+					RE2::Replace(&out[i], re, repl);
+				}
 			} else {
 				for (std::size_t i = 0; i < n; ++i) {
-					std::regex re(p[i]);
-					std::string ecma_repl = ConvertBackslashToEcma(r[i]);
-					out[i] = std::regex_replace(s[i], re, ecma_repl);
+					RE2 re(p[i]);
+					out[i] = s[i];
+					RE2::Replace(&out[i], re, r[i]);
 				}
 			}
 			return out;

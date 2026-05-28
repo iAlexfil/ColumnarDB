@@ -96,6 +96,7 @@ target_link_libraries(exec PUBLIC
         columnar
         schema
         utils
+        re2
 )
 
 add_executable(csv_to_columnar exe/csv_to_columnar.cpp)
