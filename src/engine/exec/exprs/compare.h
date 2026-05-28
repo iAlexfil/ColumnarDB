@@ -6,6 +6,7 @@
 
 #include "expr.h"
 #include "exprs/helpers.h"
+#include "utils/simd.h"
 
 namespace exec::detail {
 	template<class T, class Cmp>
@@ -17,6 +18,20 @@ namespace exec::detail {
 
 	template<class T>
 	std::vector<std::uint8_t> DispatchCmp(CmpOp op, const std::vector<T> &l, const std::vector<T> &r) {
+		if constexpr (std::is_same_v<T, std::int64_t>) {
+			std::vector<std::uint8_t> out(l.size());
+			switch (op) {
+				case CmpOp::Eq: simd::CmpEqI64(l.data(), r.data(), out.data(), l.size()); return out;
+				case CmpOp::Ne: simd::CmpEqI64(l.data(), r.data(), out.data(), l.size());
+					for (auto &x : out) x ^= 1; return out;
+				case CmpOp::Lt: simd::CmpGtI64(r.data(), l.data(), out.data(), l.size()); return out;
+				case CmpOp::Gt: simd::CmpGtI64(l.data(), r.data(), out.data(), l.size()); return out;
+				case CmpOp::Le: simd::CmpGtI64(l.data(), r.data(), out.data(), l.size());
+					for (auto &x : out) x ^= 1; return out;
+				case CmpOp::Ge: simd::CmpGtI64(r.data(), l.data(), out.data(), l.size());
+					for (auto &x : out) x ^= 1; return out;
+			}
+		}
 		switch (op) {
 			case CmpOp::Eq: return CmpLoop(l, r, [](const T &a, const T &b) { return a == b; });
 			case CmpOp::Ne: return CmpLoop(l, r, [](const T &a, const T &b) { return a != b; });
