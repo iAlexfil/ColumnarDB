@@ -338,16 +338,16 @@ namespace exec {
 	HashAggregate::~HashAggregate() = default;
 
 	std::uint32_t HashAggregate::InternString(std::string_view s) {
-		auto it = str_index_.find(s);
-		if (it != str_index_.end()) return it->second;
+		auto *p = str_index_.find(s);
+		if (p) return *p;
 		str_pool_.emplace_back(s);
 		std::uint32_t id = static_cast<std::uint32_t>(str_pool_.size() - 1);
-		str_index_.emplace(std::string_view(str_pool_.back()), id);
+		str_index_.insert(std::string_view(str_pool_.back()), id);
 		return id;
 	}
 
 	void HashAggregate::Consume() {
-		std::unordered_map<GroupKey, std::uint32_t, GroupKeyHash> map;
+		HashMap<GroupKey, GroupKeyHash> map;
 		std::vector<std::uint32_t> gids;
 		std::uint32_t num_groups = 0;
 
@@ -365,14 +365,14 @@ namespace exec {
 				k.v.reserve(key_cols.size());
 				for (const auto &kc: key_cols) k.v.push_back(ExtractKey(kc, r));
 
-				auto it = map.find(k);
+				auto *ptr = map.find(k);
 				std::uint32_t gid;
-				if (it == map.end()) {
+				if (!ptr) {
 					gid = num_groups++;
-					map.insert({std::move(k), gid});
+					map.insert(k, gid);
 					for (auto &a: aggs_) a->EnsureGroups(num_groups);
 				} else {
-					gid = it->second;
+					gid = *ptr;
 				}
 				gids[r] = gid;
 			}
@@ -384,7 +384,7 @@ namespace exec {
 		result_->Reserve(num_groups);
 
 		std::vector<const GroupKey *> sorted_keys(num_groups);
-		for (const auto &[k, gid]: map) sorted_keys[gid] = &k;
+		map.for_each([&](const GroupKey &k, std::uint32_t gid) { sorted_keys[gid] = &k; });
 
 		for (std::uint32_t gid = 0; gid < num_groups; ++gid) {
 			const GroupKey &gk = *sorted_keys[gid];

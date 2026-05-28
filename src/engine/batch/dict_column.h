@@ -3,16 +3,47 @@
 #include <cstdint>
 #include <cstring>
 #include <deque>
+#include <functional>
 #include <string>
 #include <string_view>
-#include <unordered_map>
 #include <vector>
+
+#include "utils/hash_map.h"
 
 class DictColumn {
 public:
 	using value_type = std::string;
 
 	DictColumn() = default;
+
+	DictColumn(const DictColumn &o) : dict_(o.dict_), codes_(o.codes_) {
+		rebuild_index();
+	}
+
+	DictColumn(DictColumn &&o) noexcept
+		: dict_(std::move(o.dict_)), codes_(std::move(o.codes_)) {
+		rebuild_index();
+		o.index_.clear();
+	}
+
+	DictColumn &operator=(const DictColumn &o) {
+		if (this != &o) {
+			dict_ = o.dict_;
+			codes_ = o.codes_;
+			rebuild_index();
+		}
+		return *this;
+	}
+
+	DictColumn &operator=(DictColumn &&o) noexcept {
+		if (this != &o) {
+			dict_ = std::move(o.dict_);
+			codes_ = std::move(o.codes_);
+			rebuild_index();
+			o.index_.clear();
+		}
+		return *this;
+	}
 
 	std::size_t size() const { return codes_.size(); }
 	bool empty() const { return codes_.empty(); }
@@ -25,25 +56,25 @@ public:
 	std::size_t dict_size() const { return dict_.size(); }
 
 	void push_back(const std::string &s) {
-		auto it = index_.find(s);
-		if (it != index_.end()) {
-			codes_.push_back(it->second);
+		auto *p = index_.find(s);
+		if (p) {
+			codes_.push_back(*p);
 		} else {
 			auto id = static_cast<std::uint32_t>(dict_.size());
 			dict_.push_back(s);
-			index_.emplace(std::string_view(dict_.back()), id);
+			index_.insert(std::string_view(dict_.back()), id);
 			codes_.push_back(id);
 		}
 	}
 
 	void push_back(std::string &&s) {
-		auto it = index_.find(s);
-		if (it != index_.end()) {
-			codes_.push_back(it->second);
+		auto *p = index_.find(s);
+		if (p) {
+			codes_.push_back(*p);
 		} else {
 			auto id = static_cast<std::uint32_t>(dict_.size());
 			dict_.push_back(std::move(s));
-			index_.emplace(std::string_view(dict_.back()), id);
+			index_.insert(std::string_view(dict_.back()), id);
 			codes_.push_back(id);
 		}
 	}
@@ -53,7 +84,7 @@ public:
 	void resize(std::size_t n) {
 		if (dict_.empty()) {
 			dict_.emplace_back("");
-			index_.emplace(std::string_view(dict_.back()), 0);
+			index_.insert(std::string_view(dict_.back()), 0);
 		}
 		codes_.resize(n, 0);
 	}
@@ -68,7 +99,7 @@ public:
 		dict_.assign(std::make_move_iterator(dict_vec.begin()), std::make_move_iterator(dict_vec.end()));
 		index_.clear();
 		for (std::uint32_t i = 0; i < dict_.size(); ++i) {
-			index_.emplace(std::string_view(dict_[i]), i);
+			index_.insert(std::string_view(dict_[i]), i);
 		}
 		codes_.resize(nrows);
 		if (nrows > 0) {
@@ -103,7 +134,14 @@ public:
 	}
 
 private:
+	void rebuild_index() {
+		index_.clear();
+		for (std::uint32_t i = 0; i < dict_.size(); ++i) {
+			index_.insert(std::string_view(dict_[i]), i);
+		}
+	}
+
 	std::deque<std::string> dict_;
 	std::vector<std::uint32_t> codes_;
-	std::unordered_map<std::string_view, std::uint32_t> index_;
+	HashMap<std::string_view, std::hash<std::string_view>> index_;
 };

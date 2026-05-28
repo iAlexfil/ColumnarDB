@@ -1,5 +1,6 @@
 #pragma once
 
+#include <algorithm>
 #include <climits>
 #include <cstdint>
 #include <vector>
@@ -42,6 +43,11 @@ public:
 		for (std::size_t i = 0; i <= mask_; ++i) {
 			if (vals_[i] != kEmpty) fn(slots_[i], vals_[i]);
 		}
+	}
+
+	void clear() {
+		std::fill(vals_.begin(), vals_.end(), kEmpty);
+		size_ = 0;
 	}
 
 private:

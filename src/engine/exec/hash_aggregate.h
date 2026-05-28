@@ -1,17 +1,18 @@
 #pragma once
 
 #include <deque>
+#include <functional>
 #include <memory>
 #include <optional>
 #include <string>
 #include <string_view>
-#include <unordered_map>
 #include <utility>
 #include <vector>
 
 #include "expr.h"
 #include "operator.h"
 #include "schema.h"
+#include "utils/hash_map.h"
 
 namespace exec {
 	enum class GroupAggKind { CountStar, Sum, Min, Max, Avg, CountDistinct };
@@ -50,7 +51,7 @@ namespace exec {
 		std::unique_ptr<Batch> result_;
 
 		std::deque<std::string> str_pool_;
-		std::unordered_map<std::string_view, std::uint32_t> str_index_;
+		HashMap<std::string_view, std::hash<std::string_view>> str_index_;
 
 		std::uint32_t InternString(std::string_view s);
 

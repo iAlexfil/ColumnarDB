@@ -164,11 +164,29 @@ enum class DataType {
 ```cpp
 using DataVector = std::variant<
     std::vector<int8_t>, std::vector<int16_t>, ...,
-    std::vector<std::string>
+    std::vector<double>,
+    DictColumn
 >;
 ```
 
-Каждая колонка в `Batch` — это один `DataVector`. Тип определяется схемой.
+Каждая колонка в `Batch` — это один `DataVector`. Числовые колонки хранятся как `vector<T>`, строковые — как `DictColumn` (dictionary encoding в памяти). Тип определяется схемой.
+
+### DictColumn (dictionary-encoded строки)
+
+```cpp
+class DictColumn {
+    std::deque<std::string> dict_;            // уникальные строки
+    std::vector<uint32_t> codes_;             // индекс в dict_ для каждой строки
+    std::unordered_map<string_view, uint32_t> index_;  // обратный индекс
+};
+```
+
+Вместо `vector<string>` (где "iPad" повторяется 1M раз = 1M аллокаций × ~5 байт) — одна копия "iPad" в словаре + 1M × 4 байта codes. Экономия памяти 5-10× на повторяющихся строках.
+
+- `push_back(s)` — O(1) amortized: проверяет index_, добавляет в dict_ если новая
+- `operator[](i)` — O(1): `dict_[codes_[i]]`
+- `code_at(i)` — O(1): прямой доступ к коду (для hash aggregate)
+- `deque` вместо `vector` для dict_ — элементы не перемещаются при росте, string_view в index_ остаются валидны
 
 ### EvalType (уровень исполнения)
 
@@ -198,38 +216,68 @@ using EvalCol = std::variant<
 
 ---
 
-## Колоночный формат (.columnar)
+## Колоночный формат (.columnar) — версия 2
 
 ### Структура файла
 
 ```
 ┌──────────────────────┐
-│ Header (16 bytes)    │  magic "CDB1" + version + footer_offset
+│ Header (16 bytes)    │  magic "CDB1" + version(2) + footer_offset
 ├──────────────────────┤
 │ Batch 0              │
-│   Column 0 data      │  для fixed-width: raw bytes (sizeof(T) * nrows)
-│   Column 1 data      │  для string: [len0][len1]...[data0][data1]...
+│   Column 0 data      │  encoding зависит от типа (см. ниже)
+│   Column 1 data      │
 │   ...                │
 ├──────────────────────┤
 │ Batch 1              │
 │   ...                │
 ├──────────────────────┤
-│ ...                  │
-├──────────────────────┤
-│ Footer               │  schema (names + types) + batch metadata (offsets, sizes)
+│ Footer               │  schema + batch metadata (offset, size, encoding)
 └──────────────────────┘
 ```
 
 - **Батч** = ~65536 строк. Данные каждой колонки записываются последовательно.
-- **Fixed-width колонки** (int8...float64, date, datetime): raw array, без сжатия.
-- **String колонки**: массив длин (uint32[]), затем конкатенация всех строк.
-- **Footer**: схема таблицы + для каждого батча — offset и size каждой колонки.
+- **Fixed-width колонки** (int8...float64, date, datetime): raw array, encoding = Plain.
+- **String колонки**: dictionary encoding (encoding = Dict).
+
+### Encoding: Plain (числовые колонки)
+
+```
+[raw bytes: sizeof(T) * nrows]
+```
+
+### Encoding: Dict (строковые колонки)
+
+```
+┌─────────────────────┐
+│ dict_size (uint32)   │  кол-во уникальных строк в батче
+├─────────────────────┤
+│ len0 (uint32)        │  длина строки 0 в словаре
+│ data0 (bytes)        │
+│ len1 (uint32)        │
+│ data1 (bytes)        │
+│ ...                  │
+├─────────────────────┤
+│ codes (uint32[nrows])│  индекс в словаре для каждой строки
+└─────────────────────┘
+```
+
+Если в батче 65536 строк, но только 5000 уникальных — вместо хранения 65536 строк целиком хранится 5000 строк + 65536 × 4 байта кодов. На hits.csv это даёт **~35% экономии** размера файла (695 MB → 454 MB на 1M строк).
+
+### Footer (версия 2)
+
+Для каждого chunk в footer хранится:
+- `offset: uint64` — позиция в файле
+- `size: uint64` — размер в байтах
+- `encoding: uint8` — 0 = Plain, 1 = Dict
 
 ### Чтение (mmap + readahead)
 
 `ColumnarReader` маппит весь файл через `mmap(PROT_READ, MAP_PRIVATE)`.
-Чтение колонки = `memcpy` из mapped-региона в `DataVector`.
-Перед чтением батча N вызывается `readahead(fd, offset, size)` для батча N+1 — ядро асинхронно подгружает страницы с диска.
+
+- **Plain**: `memcpy` из mapped-региона в `vector<T>`
+- **Dict**: читает словарь + `memcpy` кодов → формирует `DictColumn`
+- Перед чтением батча N вызывается `readahead(fd, offset, size)` для батча N+1 — ядро асинхронно подгружает страницы с диска
 
 Проекция колонок: если запрос использует 3 из 105 колонок — читаются только они. Остальные колонки не трогаются (seek через mmap offset).
 
@@ -307,7 +355,7 @@ Scan(reader, vector<string>{"URL", "UserID"})  // по именам
 GROUP BY + агрегатные функции. Блокирующий оператор — читает все данные при первом `Next()`.
 
 Два пути исполнения:
-- **Fast path** (≤4 ключа, без float): ключи упаковываются в `FastKeyN<N>` (8×N байт). Строковые ключи интернируются через string pool (runtime dictionary encoding). Hash-таблица: custom `HashMap` с open-addressing и quadratic probing.
+- **Fast path** (≤4 ключа, без float): ключи упаковываются в `FastKeyN<N>` (8×N байт). Строковые ключи приходят уже dictionary-encoded из `DictColumn`, их коды (uint32 → int64) кладутся прямо в `FastKeyN`. Hash-таблица: custom `HashMap` с open-addressing и quadratic probing.
 - **Generic path** (>4 ключа или float): ключи как `vector<variant<int64,uint64,double,string,uint8>>`, hash-таблица: `std::unordered_map`.
 
 Агрегатные функции (6 видов):
@@ -470,6 +518,7 @@ class HashMap {
     uint32_t* find(const Key& k);
     void insert(const Key& k, uint32_t v);
     void for_each(Fn fn) const;
+    void clear();
 };
 ```
 
@@ -478,9 +527,34 @@ class HashMap {
 - **Quadratic probing** — `(h + step*(step+1)/2) & mask` — избегает clustering
 - **Power-of-2 размер** — побитовый AND вместо модуля
 - **Только insert + find** — нет erase (не нужен для aggregate)
-- **Sentinel**: `UINT32_MAX` = пустой слот
+- **Value всегда `uint32_t`** — sentinel `UINT32_MAX` = пустой слот (одна линия памяти на запись)
 
-Хеш-функция для ключей: splitmix64 mixing для каждого int64 элемента ключа. Устраняет clustering на последовательных id (важно для runtime dictionary encoding).
+### Где используется
+
+| Место | Key | Что хранит |
+|---|---|---|
+| `HashAggregate::ConsumeFastImpl<N>` | `FastKeyN<N>` (≤4 int64) | group id |
+| `HashAggregate::Consume()` (generic) | `GroupKey` (variant вектор) | group id |
+| `HashAggregate::str_index_` | `string_view` | id в string pool |
+| `DictColumn::index_` | `string_view` | id в словаре батча |
+
+### SplitMix64 mixing
+
+Хеш-функция для интегральных ключей использует **SplitMix64** — три раунда `xor-shift + multiply`:
+
+```cpp
+v ^= v >> 33;
+v *= 0xff51afd7ed558ccdULL;
+v ^= v >> 33;
+v *= 0xc4ceb9fe1a85ec53ULL;
+v ^= v >> 33;
+```
+
+Зачем: `std::hash<int64_t>` обычно тождественный — возвращает само число. При power-of-2 размере таблицы и последовательных id (0, 1, 2, ...) все ключи попадают в близкие buckets → кластеризация → O(n²) probe loops.
+
+SplitMix64 даёт идеальный avalanche: изменение 1 бита на входе → ~50% битов на выходе. Это критично когда ключи — id из dictionary encoding (всегда последовательные).
+
+Происхождение: автор Sebastiano Vigna (Java SplittableRandom). Константы — те же что в MurmurHash3 finalizer.
 
 ---
 

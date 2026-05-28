@@ -33,6 +33,7 @@ namespace columnar {
 		Schema schema_;
 		std::vector<BatchMeta> batches_;
 		bool finalized_ = false;
+		std::uint64_t pos_ = 0;
 
 		void WriteHeader();
 

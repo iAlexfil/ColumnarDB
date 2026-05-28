@@ -167,7 +167,22 @@ namespace columnar {
 
 		auto readFixed = [&]<class T>(std::vector<T> &vec) {
 			vec.resize(nrows);
-			if (nrows > 0) std::memcpy(vec.data(), p, nrows * sizeof(T));
+			if (nrows == 0) return;
+			if (ch.encoding == Encoding::RLE) {
+				std::size_t off = 0;
+				const auto num_runs = ReadAt<std::uint32_t>(p, off);
+				off += sizeof(std::uint32_t);
+				std::size_t pos = 0;
+				for (std::uint32_t r = 0; r < num_runs; ++r) {
+					const auto val = ReadAt<T>(p, off);
+					off += sizeof(T);
+					const auto cnt = ReadAt<std::uint32_t>(p, off);
+					off += sizeof(std::uint32_t);
+					for (std::uint32_t k = 0; k < cnt; ++k) vec[pos++] = val;
+				}
+			} else {
+				std::memcpy(vec.data(), p, nrows * sizeof(T));
+			}
 		};
 
 		switch (cs.type) {

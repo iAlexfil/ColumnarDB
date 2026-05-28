@@ -4,11 +4,12 @@
 #include <vector>
 
 namespace columnar {
-	static constexpr std::uint32_t kColumnarVersion = 2;
+	static constexpr std::uint32_t kColumnarVersion = 3;
 
 	enum class Encoding : std::uint8_t {
 		Plain = 0,
 		Dict  = 1,
+		RLE   = 2,
 	};
 
 	struct ChunkMeta {
