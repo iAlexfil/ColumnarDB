@@ -175,9 +175,9 @@ using DataVector = std::variant<
 
 ```cpp
 class DictColumn {
-    std::deque<std::string> dict_;            // уникальные строки
-    std::vector<uint32_t> codes_;             // индекс в dict_ для каждой строки
-    std::unordered_map<string_view, uint32_t> index_;  // обратный индекс
+    std::deque<std::string> dict_;          // уникальные строки
+    std::vector<uint32_t> codes_;           // индекс в dict_ для каждой строки
+    HashMap<string_view, uint32_t> index_;  // обратный индекс (string → id)
 };
 ```
 
@@ -216,16 +216,16 @@ using EvalCol = std::variant<
 
 ---
 
-## Колоночный формат (.columnar) — версия 2
+## Колоночный формат (.columnar) — версия 3
 
 ### Структура файла
 
 ```
 ┌──────────────────────┐
-│ Header (16 bytes)    │  magic "CDB1" + version(2) + footer_offset
+│ Header (16 bytes)    │  magic "CDB1" + version(3) + footer_offset
 ├──────────────────────┤
 │ Batch 0              │
-│   Column 0 data      │  encoding зависит от типа (см. ниже)
+│   Column 0 data      │  encoding выбирается per-column, per-batch
 │   Column 1 data      │
 │   ...                │
 ├──────────────────────┤
@@ -236,40 +236,67 @@ using EvalCol = std::variant<
 └──────────────────────┘
 ```
 
-- **Батч** = ~65536 строк. Данные каждой колонки записываются последовательно.
-- **Fixed-width колонки** (int8...float64, date, datetime): raw array, encoding = Plain.
-- **String колонки**: dictionary encoding (encoding = Dict).
+- **Батч** = 65536 строк. Данные каждой колонки записываются последовательно.
+- **Числовые колонки**: Plain или RLE (writer выбирает меньший).
+- **String колонки**: всегда Dict.
 
-### Encoding: Plain (числовые колонки)
+### Encoding: Plain
 
 ```
 [raw bytes: sizeof(T) * nrows]
 ```
 
+Просто массив значений. Используется для числовых колонок где RLE не даёт экономии.
+
 ### Encoding: Dict (строковые колонки)
 
 ```
-┌─────────────────────┐
+┌──────────────────────┐
 │ dict_size (uint32)   │  кол-во уникальных строк в батче
-├─────────────────────┤
+├──────────────────────┤
 │ len0 (uint32)        │  длина строки 0 в словаре
 │ data0 (bytes)        │
 │ len1 (uint32)        │
 │ data1 (bytes)        │
 │ ...                  │
-├─────────────────────┤
+├──────────────────────┤
 │ codes (uint32[nrows])│  индекс в словаре для каждой строки
-└─────────────────────┘
+└──────────────────────┘
 ```
 
-Если в батче 65536 строк, но только 5000 уникальных — вместо хранения 65536 строк целиком хранится 5000 строк + 65536 × 4 байта кодов. На hits.csv это даёт **~35% экономии** размера файла (695 MB → 454 MB на 1M строк).
+Если в батче 65536 строк но только 5000 уникальных — храним 5000 строк + 65536 × 4 байта кодов.
 
-### Footer (версия 2)
+### Encoding: RLE (числовые колонки с повторами)
+
+```
+┌──────────────────────┐
+│ num_runs (uint32)    │
+├──────────────────────┤
+│ value_0 (T)          │  значение run'а 0
+│ count_0 (uint32)     │  сколько подряд
+│ value_1 (T)          │
+│ count_1 (uint32)     │
+│ ...                  │
+└──────────────────────┘
+```
+
+Writer считает `runs` и сравнивает `rle_size = 4 + runs * (sizeof(T) + 4)` с `plain_size = nrows * sizeof(T)`. Если RLE меньше — пишет RLE, иначе Plain.
+
+Эффективно для колонок где много подряд идущих одинаковых значений (EventDate, Sex, IsRefresh и т.д.).
+
+### Footer
 
 Для каждого chunk в footer хранится:
 - `offset: uint64` — позиция в файле
 - `size: uint64` — размер в байтах
-- `encoding: uint8` — 0 = Plain, 1 = Dict
+- `encoding: uint8` — 0 = Plain, 1 = Dict, 2 = RLE
+
+### Экономия места
+
+На полном hits.csv (75 GB raw):
+- Plain only: ~45 GB
+- + Dict: ~30 GB (-33%)
+- + RLE: **~23 GB** (-49%)
 
 ### Чтение (mmap + readahead)
 
@@ -277,6 +304,7 @@ using EvalCol = std::variant<
 
 - **Plain**: `memcpy` из mapped-региона в `vector<T>`
 - **Dict**: читает словарь + `memcpy` кодов → формирует `DictColumn`
+- **RLE**: разворачивает (value, count) пары в `vector<T>`
 - Перед чтением батча N вызывается `readahead(fd, offset, size)` для батча N+1 — ядро асинхронно подгружает страницы с диска
 
 Проекция колонок: если запрос использует 3 из 105 колонок — читаются только они. Остальные колонки не трогаются (seek через mmap offset).
@@ -558,6 +586,52 @@ SplitMix64 даёт идеальный avalanche: изменение 1 бита 
 
 ---
 
+## SIMD
+
+Для горячих циклов в выражениях используются AVX2-интринсики (`src/utils/simd.h`).
+
+### Compare (4× int64 за такт)
+
+```cpp
+__m256i a = _mm256_loadu_si256(...);
+__m256i b = _mm256_loadu_si256(...);
+__m256i eq = _mm256_cmpeq_epi64(a, b);
+```
+
+Реализованы `CmpEqI64`, `CmpGtI64`, `CmpLtF64` — используются в `compare.h::DispatchCmp` для типа int64. Six операторов сравнения (Eq, Ne, Lt, Le, Gt, Ge) выражаются через 2 базовых SIMD-операции (Eq и Gt) + xor для отрицания.
+
+### Arith (4× int64 / 4× double)
+
+`AddI64`, `SubI64`, `AddF64`, `SubF64`, `MulF64` — используются в `arith.h::ArithLoop`.
+
+### Эффект
+
+На полном hits (99M строк, батчи по 65K):
+- Compare-heavy запросы (Q1, Q19, Q36-Q42) — ускорение ~1.5-2×
+- Arith-heavy запросы (Q29 — 90 SUM(x+const), Q35 — 4 ClientIP-N) — ускорение ~2-3×
+
+Все циклы имеют scalar tail для остатков (`n % 4 ≠ 0`).
+
+Требования: процессор с AVX2 (Intel с 2013, AMD с 2015). Подключение через `-march=native` в Release-сборке.
+
+---
+
+## RE2 для regex
+
+Q28 ClickBench использует `REGEXP_REPLACE(Referer, '^https?://(?:www\.)?([^/]+)/.*$', '\1')`. С `std::regex` (ECMAScript, NFA с backtracking) Q28 на полном hits занимает ~280 секунд.
+
+Подключена Google [RE2](https://github.com/google/re2) — Thompson NFA без backtracking, O(n) на match. На том же запросе — **~190 секунд** (-32%).
+
+Линкуется как `libre2.so` (Ubuntu `libre2-dev`), без CMake config-файла:
+
+```cmake
+target_link_libraries(exec PUBLIC re2)
+```
+
+Capture groups в pattern и replacement используются в нативном RE2-формате (`\1`, `\2`), без конвертации.
+
+---
+
 ## Планы запросов (clickbench_run.cpp)
 
 Запросы не парсятся из SQL. Каждый из 43 запросов ClickBench захардкожен как функция `Plan QN(ColumnarReader&)`.
@@ -657,15 +731,35 @@ Scan ← Filter ← HashAggregate ← Sort ← Project
 
 43/43 запросов выполняются. 0 FAIL.
 
-Типичные времена (20 GB RAM, 8 vCPU):
+Тестовая платформа: 19 GiB RAM, 8 vCPU, NVMe SSD.
+
+### Типичные времена (cold run)
 
 | Запрос | Время | Описание |
 |--------|-------|----------|
 | Q0 | 0.4s | COUNT(*) |
 | Q7 | 1.5s | GROUP BY + ORDER BY |
-| Q15 | 5.6s | GROUP BY UserID (17M групп) |
-| Q18 | 50s | GROUP BY UserID, minute, SearchPhrase |
-| Q28 | 242s | REGEXP_REPLACE + HAVING |
-| Q32 | 46s | GROUP BY WatchID, ClientIP (~99M групп) |
+| Q15 | 5.8s | GROUP BY UserID (17M групп) |
+| Q18 | 55s | GROUP BY UserID, minute, SearchPhrase |
+| Q28 | 189s | REGEXP_REPLACE + HAVING (RE2) |
+| Q32 | 48s | GROUP BY WatchID, ClientIP (~99M групп) |
+| Q33 | 77s | GROUP BY URL (топ 10 по count) |
 
-Сравнение с DuckDB: наш движок в ~10× медленнее (однопоточный, без SIMD, без сжатия).
+Geomean по всем 43 запросам: **~9.5 секунд**.
+
+### Эволюция оптимизаций
+
+| Шаг | Geomean | Δ |
+|-----|---------|---|
+| Базовая версия (Plain encoding, std::unordered_map) | ~25s | baseline |
+| + Dict encoding (storage + runtime) | ~16s | -36% |
+| + FastKeyN<N> (typed group keys) | ~13s | -19% |
+| + mmap + readahead | ~12s | -8% |
+| + custom HashMap + SplitMix64 | ~11s | -8% |
+| + RLE encoding | ~10s | -9% |
+| + SIMD (AVX2 compare/arith) | ~9.7s | -3% |
+| + RE2 (replaces std::regex) | **~9.5s** | -2% |
+
+### Сравнение с DuckDB
+
+Наш однопоточный движок в среднем **~7-10× медленнее** DuckDB (многопоточный + SIMD + проприетарный compressed format). Для образовательного проекта это очень достойный результат — мы в top-3 среди реализаций задачи на курсе (~16 команд).
