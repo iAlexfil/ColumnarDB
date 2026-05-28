@@ -3,7 +3,7 @@
 #include "expr.h"
 #include "exprs/helpers.h"
 
-namespace exec::detail {
+namespace exec {
 	class ColumnExpr final : public Expr {
 	public:
 		ColumnExpr(std::size_t idx, EvalType result_type)

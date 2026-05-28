@@ -8,7 +8,7 @@
 #include "exprs/helpers.h"
 #include "utils/simd.h"
 
-namespace exec::detail {
+namespace exec {
 	template<class T, class Cmp>
 	std::vector<std::uint8_t> CmpLoop(const std::vector<T> &l, const std::vector<T> &r, Cmp cmp) {
 		std::vector<std::uint8_t> out(l.size());
@@ -21,15 +21,21 @@ namespace exec::detail {
 		if constexpr (std::is_same_v<T, std::int64_t>) {
 			std::vector<std::uint8_t> out(l.size());
 			switch (op) {
-				case CmpOp::Eq: simd::CmpEqI64(l.data(), r.data(), out.data(), l.size()); return out;
+				case CmpOp::Eq: simd::CmpEqI64(l.data(), r.data(), out.data(), l.size());
+					return out;
 				case CmpOp::Ne: simd::CmpEqI64(l.data(), r.data(), out.data(), l.size());
-					for (auto &x : out) x ^= 1; return out;
-				case CmpOp::Lt: simd::CmpGtI64(r.data(), l.data(), out.data(), l.size()); return out;
-				case CmpOp::Gt: simd::CmpGtI64(l.data(), r.data(), out.data(), l.size()); return out;
+					for (auto &x: out) x ^= 1;
+					return out;
+				case CmpOp::Lt: simd::CmpGtI64(r.data(), l.data(), out.data(), l.size());
+					return out;
+				case CmpOp::Gt: simd::CmpGtI64(l.data(), r.data(), out.data(), l.size());
+					return out;
 				case CmpOp::Le: simd::CmpGtI64(l.data(), r.data(), out.data(), l.size());
-					for (auto &x : out) x ^= 1; return out;
+					for (auto &x: out) x ^= 1;
+					return out;
 				case CmpOp::Ge: simd::CmpGtI64(r.data(), l.data(), out.data(), l.size());
-					for (auto &x : out) x ^= 1; return out;
+					for (auto &x: out) x ^= 1;
+					return out;
 			}
 		}
 		switch (op) {

@@ -17,7 +17,7 @@
 #include "schema.h"
 
 namespace exec {
-	namespace detail {
+	namespace {
 		inline void SortAppendBatch(Batch &dst, const Batch &src,
 		                            const std::vector<std::uint32_t> *sel) {
 			for (std::size_t c = 0; c < dst.ColCount(); ++c) {
@@ -51,14 +51,14 @@ namespace exec {
 				if constexpr (std::is_same_v<V, DictColumn>) {
 					DictColumn dc;
 					dc.reserve(idx.size());
-					for (auto p : idx) dc.push_back(v[p]);
+					for (auto p: idx) dc.push_back(v[p]);
 					dst.template emplace<DictColumn>(std::move(dc));
 				} else {
 					using T = typename V::value_type;
 					std::vector<T> out;
 					out.reserve(idx.size());
 					for (auto p: idx) out.push_back(v[p]);
-					dst.template emplace<std::vector<T>>(std::move(out));
+					dst.template emplace<std::vector<T> >(std::move(out));
 				}
 			}, src);
 		}
@@ -98,7 +98,7 @@ namespace exec {
 			auto accum = std::make_unique<Batch>(schema);
 			while (auto eb = child_.Next()) {
 				const std::vector<std::uint32_t> *sel = eb->full_selection() ? nullptr : &eb->sel;
-				detail::SortAppendBatch(*accum, *eb->batch, sel);
+				SortAppendBatch(*accum, *eb->batch, sel);
 			}
 
 			const std::size_t n = accum->RowCount();
@@ -112,7 +112,7 @@ namespace exec {
 
 			std::stable_sort(idx.begin(), idx.end(), [&](std::uint32_t a, std::uint32_t b) {
 				for (std::size_t k = 0; k < key_cols.size(); ++k) {
-					int c = detail::SortCompareAt(key_cols[k], a, b);
+					int c = SortCompareAt(key_cols[k], a, b);
 					if (c != 0) return key_asc_[k] ? (c < 0) : (c > 0);
 				}
 				return false;
@@ -124,7 +124,7 @@ namespace exec {
 
 			result_ = std::make_unique<Batch>(schema);
 			for (std::size_t c = 0; c < schema.size(); ++c) {
-				detail::SortGatherInto(accum->GetColumn(c), trimmed, result_->GetColumn(c));
+				SortGatherInto(accum->GetColumn(c), trimmed, result_->GetColumn(c));
 			}
 			result_->SetRowCount(trimmed.size());
 		}

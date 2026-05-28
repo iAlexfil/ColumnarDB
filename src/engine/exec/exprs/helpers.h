@@ -9,7 +9,7 @@
 
 #include "expr.h"
 
-namespace exec::detail {
+namespace exec {
 	inline EvalType CommonNumericType(EvalType a, EvalType b) {
 		if (a == EvalType::F64 || b == EvalType::F64) return EvalType::F64;
 		if (a == b) return a;

@@ -17,7 +17,7 @@
 #include "schema.h"
 
 namespace exec {
-	namespace detail {
+	namespace {
 		using TopKKeyVal = std::variant<std::int64_t, std::uint64_t, double, std::string, std::uint8_t>;
 
 		inline int CompareKeyVal(const TopKKeyVal &a, const TopKKeyVal &b) {
@@ -84,11 +84,9 @@ namespace exec {
 
 	private:
 		void Consume() {
-			using detail::TopKCandidate;
-
 			auto better = [&](const TopKCandidate &a, const TopKCandidate &b) -> bool {
 				for (std::size_t i = 0; i < key_asc_.size(); ++i) {
-					int c = detail::CompareKeyVal(a.keys[i], b.keys[i]);
+					int c = CompareKeyVal(a.keys[i], b.keys[i]);
 					if (c == 0) continue;
 					return key_asc_[i] ? (c < 0) : (c > 0);
 				}
@@ -107,7 +105,7 @@ namespace exec {
 				const std::size_t nrows = ctx.rows();
 				for (std::size_t r = 0; r < nrows; ++r) {
 					TopKCandidate cand;
-					cand.keys = detail::ExtractKeys(key_cols, r);
+					cand.keys = ExtractKeys(key_cols, r);
 
 					bool should_take = heap.size() < k_ || better(cand, heap.front());
 					if (!should_take) continue;
@@ -115,7 +113,7 @@ namespace exec {
 					std::uint32_t src_row = eb->full_selection()
 						                        ? static_cast<std::uint32_t>(r)
 						                        : eb->sel[r];
-					cand.row = detail::ExtractRow(*eb->batch, src_row);
+					cand.row = ExtractRow(*eb->batch, src_row);
 
 					if (heap.size() < k_) {
 						heap.push_back(std::move(cand));
@@ -140,7 +138,7 @@ namespace exec {
 						if constexpr (std::is_same_v<T, std::string>) {
 							std::get<DictColumn>(result_->GetColumn(i)).push_back(x);
 						} else {
-							std::get<std::vector<T>>(result_->GetColumn(i)).push_back(x);
+							std::get<std::vector<T> >(result_->GetColumn(i)).push_back(x);
 						}
 					}, c.row[i]);
 				}

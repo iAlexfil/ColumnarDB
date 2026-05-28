@@ -57,7 +57,7 @@ namespace exec {
 
 	ExprPtr MakeColumn(const Schema &s, std::size_t idx) {
 		if (idx >= s.size()) throw std::runtime_error("MakeColumn: idx out of range");
-		return std::make_unique<detail::ColumnExpr>(idx, DataTypeToEvalType(s[idx].type));
+		return std::make_unique<ColumnExpr>(idx, DataTypeToEvalType(s[idx].type));
 	}
 
 	ExprPtr MakeColumnByName(const Schema &s, std::string_view name) {
@@ -65,46 +65,46 @@ namespace exec {
 	}
 
 	ExprPtr MakeConstI64(std::int64_t v) {
-		return std::make_unique<detail::ConstExpr<std::int64_t> >(v, EvalType::I64);
+		return std::make_unique<ConstExpr<std::int64_t> >(v, EvalType::I64);
 	}
 
 	ExprPtr MakeConstU64(std::uint64_t v) {
-		return std::make_unique<detail::ConstExpr<std::uint64_t> >(v, EvalType::U64);
+		return std::make_unique<ConstExpr<std::uint64_t> >(v, EvalType::U64);
 	}
 
 	ExprPtr MakeConstF64(double v) {
-		return std::make_unique<detail::ConstExpr<double> >(v, EvalType::F64);
+		return std::make_unique<ConstExpr<double> >(v, EvalType::F64);
 	}
 
 	ExprPtr MakeConstStr(std::string v) {
-		return std::make_unique<detail::ConstExpr<std::string> >(std::move(v), EvalType::Str);
+		return std::make_unique<ConstExpr<std::string> >(std::move(v), EvalType::Str);
 	}
 
 	ExprPtr MakeConstDate(std::int64_t days) {
-		return std::make_unique<detail::ConstExpr<std::int64_t> >(days, EvalType::Date);
+		return std::make_unique<ConstExpr<std::int64_t> >(days, EvalType::Date);
 	}
 
 	ExprPtr MakeConstDateTime(std::int64_t seconds) {
-		return std::make_unique<detail::ConstExpr<std::int64_t> >(seconds, EvalType::DateTime);
+		return std::make_unique<ConstExpr<std::int64_t> >(seconds, EvalType::DateTime);
 	}
 
 	ExprPtr MakeCompare(ExprPtr l, CmpOp op, ExprPtr r) {
-		return std::make_unique<detail::CompareExpr>(std::move(l), op, std::move(r));
+		return std::make_unique<CompareExpr>(std::move(l), op, std::move(r));
 	}
 
 	ExprPtr MakeLogical(LogOp op, std::vector<ExprPtr> args) {
-		return std::make_unique<detail::LogicalExpr>(op, std::move(args));
+		return std::make_unique<LogicalExpr>(op, std::move(args));
 	}
 
 	ExprPtr MakeArith(ExprPtr l, ArithOp op, ExprPtr r) {
-		return std::make_unique<detail::ArithExpr>(std::move(l), op, std::move(r));
+		return std::make_unique<ArithExpr>(std::move(l), op, std::move(r));
 	}
 
 	ExprPtr MakeInList(ExprPtr lhs, std::vector<ExprPtr> consts) {
-		return std::make_unique<detail::InListExpr>(std::move(lhs), std::move(consts));
+		return std::make_unique<InListExpr>(std::move(lhs), std::move(consts));
 	}
 
 	ExprPtr MakeIf(ExprPtr cond, ExprPtr t, ExprPtr f) {
-		return std::make_unique<detail::IfExpr>(std::move(cond), std::move(t), std::move(f));
+		return std::make_unique<IfExpr>(std::move(cond), std::move(t), std::move(f));
 	}
 }

@@ -6,7 +6,7 @@
 
 #include "expr.h"
 
-namespace exec::detail {
+namespace exec {
 	class LogicalExpr final : public Expr {
 	public:
 		LogicalExpr(LogOp op, std::vector<ExprPtr> args) : op_(op), args_(std::move(args)) {

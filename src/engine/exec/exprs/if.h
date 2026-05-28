@@ -10,7 +10,7 @@
 #include "expr.h"
 #include "exprs/helpers.h"
 
-namespace exec::detail {
+namespace exec {
 	template<class T>
 	EvalCol PickIfBranch(const std::vector<std::uint8_t> &cv,
 	                     const EvalCol &tv, const EvalCol &fv) {

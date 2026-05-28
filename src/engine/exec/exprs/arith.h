@@ -9,19 +9,34 @@
 #include "exprs/helpers.h"
 #include "utils/simd.h"
 
-namespace exec::detail {
+namespace exec {
 	template<class T>
 	std::vector<T> ArithLoop(ArithOp op, const std::vector<T> &l, const std::vector<T> &r) {
 		const std::size_t n = l.size();
 		std::vector<T> out(n);
 		if constexpr (std::is_same_v<T, std::int64_t>) {
-			if (op == ArithOp::Add) { simd::AddI64(l.data(), r.data(), out.data(), n); return out; }
-			if (op == ArithOp::Sub) { simd::SubI64(l.data(), r.data(), out.data(), n); return out; }
+			if (op == ArithOp::Add) {
+				simd::AddI64(l.data(), r.data(), out.data(), n);
+				return out;
+			}
+			if (op == ArithOp::Sub) {
+				simd::SubI64(l.data(), r.data(), out.data(), n);
+				return out;
+			}
 		}
 		if constexpr (std::is_same_v<T, double>) {
-			if (op == ArithOp::Add) { simd::AddF64(l.data(), r.data(), out.data(), n); return out; }
-			if (op == ArithOp::Sub) { simd::SubF64(l.data(), r.data(), out.data(), n); return out; }
-			if (op == ArithOp::Mul) { simd::MulF64(l.data(), r.data(), out.data(), n); return out; }
+			if (op == ArithOp::Add) {
+				simd::AddF64(l.data(), r.data(), out.data(), n);
+				return out;
+			}
+			if (op == ArithOp::Sub) {
+				simd::SubF64(l.data(), r.data(), out.data(), n);
+				return out;
+			}
+			if (op == ArithOp::Mul) {
+				simd::MulF64(l.data(), r.data(), out.data(), n);
+				return out;
+			}
 		}
 		switch (op) {
 			case ArithOp::Add: for (std::size_t i = 0; i < n; ++i) out[i] = l[i] + r[i];

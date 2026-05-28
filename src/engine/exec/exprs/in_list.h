@@ -9,7 +9,7 @@
 #include "expr.h"
 #include "exprs/helpers.h"
 
-namespace exec::detail {
+namespace exec {
 	template<class T>
 	EvalCol EvalInListIntegral(const EvalCol &lc,
 	                           const std::vector<ExprPtr> &rhs,
