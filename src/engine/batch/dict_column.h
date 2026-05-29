@@ -49,11 +49,9 @@ public:
 	bool empty() const { return codes_.empty(); }
 
 	const std::string &operator[](std::size_t i) const { return dict_[codes_[i]]; }
-	std::uint32_t code_at(std::size_t i) const { return codes_[i]; }
 
 	const std::deque<std::string> &dictionary() const { return dict_; }
 	const std::vector<std::uint32_t> &codes() const { return codes_; }
-	std::size_t dict_size() const { return dict_.size(); }
 
 	void push_back(const std::string &s) {
 		auto *p = index_.find(s);
@@ -105,12 +103,6 @@ public:
 		if (nrows > 0) {
 			std::memcpy(codes_.data(), codes_raw, nrows * sizeof(std::uint32_t));
 		}
-	}
-
-	std::vector<std::string> materialize() const {
-		std::vector<std::string> out(codes_.size());
-		for (std::size_t i = 0; i < codes_.size(); ++i) out[i] = dict_[codes_[i]];
-		return out;
 	}
 
 	bool operator==(const DictColumn &o) const {

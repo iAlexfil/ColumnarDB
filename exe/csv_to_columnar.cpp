@@ -1,5 +1,4 @@
 #include <cstdio>
-#include <cstring>
 #include <filesystem>
 #include <fstream>
 #include <iostream>
@@ -17,43 +16,75 @@ namespace {
 
 constexpr std::size_t kBatchRows = 65536;
 constexpr std::size_t kReadBuf = 4 * 1024 * 1024;
+	
+class CsvParser {
+public:
+	explicit CsvParser(FILE *fp) : fp_(fp) {
+		buf_.resize(kReadBuf);
+	}
 
-void SplitCsvLine(const char *line, std::size_t len, std::vector<std::string> &out) {
-	out.clear();
-	std::string field;
-	bool in_quotes = false;
-	bool field_started = false;
-
-	for (std::size_t i = 0; i < len; ++i) {
-		char c = line[i];
-
-		if (in_quotes) {
-			if (c == '"') {
-				if (i + 1 < len && line[i + 1] == '"') {
-					field.push_back('"');
-					++i;
-				} else {
-					in_quotes = false;
-				}
-			} else {
-				field.push_back(c);
-			}
-		} else {
-			if (c == ',') {
-				out.push_back(std::move(field));
-				field.clear();
-				field_started = false;
-			} else if (c == '"' && !field_started) {
-				in_quotes = true;
-				field_started = true;
-			} else {
-				field.push_back(c);
-				field_started = true;
-			}
+	template<class Fn>
+	void ForEachRecord(Fn fn) {
+		while (true) {
+			std::size_t n = std::fread(buf_.data(), 1, buf_.size(), fp_);
+			if (n == 0) break;
+			for (std::size_t i = 0; i < n; ++i) Feed(buf_[i], fn);
+		}
+		if (in_quotes_ || field_started_ || !field_.empty() || !fields_.empty()) {
+			FinishField();
+			fn(fields_);
+			fields_.clear();
 		}
 	}
-	out.push_back(std::move(field));
-}
+
+private:
+	template<class Fn>
+	void Feed(char c, Fn &fn) {
+		if (in_quotes_) {
+			if (pending_quote_) {
+				pending_quote_ = false;
+				if (c == '"') {
+					field_.push_back('"');
+					return;
+				}
+				in_quotes_ = false;
+			} else {
+				if (c == '"') { pending_quote_ = true; return; }
+				field_.push_back(c);
+				return;
+			}
+		}
+
+		if (c == '"' && !field_started_) {
+			in_quotes_ = true;
+			field_started_ = true;
+		} else if (c == ',') {
+			FinishField();
+		} else if (c == '\n') {
+			FinishField();
+			fn(fields_);
+			fields_.clear();
+		} else if (c == '\r') {
+		} else {
+			field_.push_back(c);
+			field_started_ = true;
+		}
+	}
+
+	void FinishField() {
+		fields_.push_back(std::move(field_));
+		field_.clear();
+		field_started_ = false;
+	}
+
+	FILE *fp_;
+	std::vector<char> buf_;
+	std::vector<std::string> fields_;
+	std::string field_;
+	bool in_quotes_ = false;
+	bool pending_quote_ = false;
+	bool field_started_ = false;
+};
 
 }
 
@@ -81,69 +112,46 @@ int main(int argc, char **argv) {
 		if (!schema_in) throw std::runtime_error("cannot open schema: " + schema_path);
 		Schema schema = LoadSchemaCsv(schema_in);
 
-		FILE *fp = std::fopen(input.c_str(), "r");
+		FILE *fp = std::fopen(input.c_str(), "rb");
 		if (!fp) throw std::runtime_error("cannot open input: " + input);
-		std::setvbuf(fp, nullptr, _IOFBF, kReadBuf);
 
 		if (fs::path(output).has_parent_path()) fs::create_directories(fs::path(output).parent_path());
 
 		columnar::ColumnarWriter writer(output, schema);
-
 		Batch batch(schema);
 		batch.Reserve(kBatchRows);
 
 		std::size_t total_rows = 0;
-		std::size_t skipped_field_count = 0;
-		std::size_t skipped_parse = 0;
+		std::size_t skipped = 0;
 		std::size_t line_no = 0;
-		std::vector<std::string> fields;
-		char *line_buf = nullptr;
-		std::size_t line_cap = 0;
 
-		while (true) {
-			ssize_t nread = getline(&line_buf, &line_cap, fp);
-			if (nread < 0) break;
+		CsvParser parser(fp);
+		parser.ForEachRecord([&](const std::vector<std::string> &fields) {
 			++line_no;
-
-			while (nread > 0 && (line_buf[nread - 1] == '\n' || line_buf[nread - 1] == '\r'))
-				--nread;
-			if (nread == 0) continue;
-
-			SplitCsvLine(line_buf, static_cast<std::size_t>(nread), fields);
-
-			if (fields.size() != schema.size()) {
-				++skipped_field_count;
-				continue;
-			}
-
+			if (fields.size() != schema.size()) { ++skipped; return; }
 			try {
 				batch.AppendRow(fields, line_no);
 			} catch (const std::exception &) {
-				++skipped_parse;
-				continue;
+				++skipped;
+				return;
 			}
-
 			if (batch.RowCount() >= kBatchRows) {
 				writer.WriteBatch(batch);
 				total_rows += batch.RowCount();
 				batch.Clear();
 			}
-		}
+		});
 
 		if (batch.RowCount() > 0) {
 			writer.WriteBatch(batch);
 			total_rows += batch.RowCount();
 		}
 
-		std::free(line_buf);
 		std::fclose(fp);
 		writer.Finish();
 
 		std::cout << "wrote " << total_rows << " rows to " << output << "\n";
-		if (skipped_field_count + skipped_parse > 0) {
-			std::cout << "skipped " << skipped_field_count << " rows (field count mismatch), "
-			          << skipped_parse << " rows (parse errors)\n";
-		}
+		if (skipped > 0) std::cout << "skipped " << skipped << " malformed rows\n";
 		return 0;
 	} catch (const std::exception &e) {
 		std::cerr << "Error: " << e.what() << "\n";

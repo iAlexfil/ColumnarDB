@@ -1,8 +1,7 @@
 #pragma once
 
-#include <cstdint>
 #include <cstddef>
-#include <vector>
+#include <cstdint>
 
 #include <immintrin.h>
 
@@ -93,20 +92,5 @@ namespace simd {
 			_mm256_storeu_pd(out + i, _mm256_mul_pd(a, b));
 		}
 		for (; i < n; ++i) out[i] = l[i] * r[i];
-	}
-
-	inline void CmpLtF64(const double *l, const double *r,
-	                     std::uint8_t *out, std::size_t n) {
-		std::size_t i = 0;
-		for (; i + 4 <= n; i += 4) {
-			__m256d a = _mm256_loadu_pd(l + i);
-			__m256d b = _mm256_loadu_pd(r + i);
-			int mask = _mm256_movemask_pd(_mm256_cmp_pd(a, b, _CMP_LT_OQ));
-			out[i + 0] = (mask >> 0) & 1;
-			out[i + 1] = (mask >> 1) & 1;
-			out[i + 2] = (mask >> 2) & 1;
-			out[i + 3] = (mask >> 3) & 1;
-		}
-		for (; i < n; ++i) out[i] = (l[i] < r[i]) ? 1 : 0;
 	}
 }

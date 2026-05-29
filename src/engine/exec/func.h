@@ -22,10 +22,10 @@ namespace exec {
 
 		const ScalarFn *Lookup(const std::string &name, const std::vector<EvalType> &args) const;
 
-		void Add(ScalarFn fn);
-
 	private:
 		FuncRegistry();
+
+		void Add(ScalarFn fn);
 
 		std::unordered_map<std::string, std::vector<ScalarFn> > overloads_;
 	};

@@ -1,16 +1,103 @@
 # ColumnarDB
 
-Колоночная СУБД для аналитических запросов. Выполняет все 43 запроса ClickBench на полном датасете hits (99M строк, 105 колонок).
+Колоночная аналитическая СУБД, выполняющая все 43 запроса бенчмарка [ClickBench](https://github.com/ClickHouse/ClickBench) на полном датасете `hits` (≈100 млн строк, 105 колонок).
 
-C++23, CMake, GoogleTest. Без внешних зависимостей.
+Написана на C++23. Сборка через CMake, тесты на GoogleTest. Из внешних зависимостей — только [RE2](https://github.com/google/re2) (для одного запроса с регулярными выражениями).
 
-## Быстрый старт
+Проект не реализует SQL-парсер: каждый из 43 запросов ClickBench собран вручную из операторов исполнительного движка (как если бы планировщик уже отработал). Это позволяет сфокусироваться на самом интересном — на хранении колонок и физическом исполнении.
 
-### Требования
+---
 
-- Linux (Ubuntu 22.04+)
-- CMake 3.25+
-- g++ с поддержкой C++23
+## Оглавление
+
+1. [Что вообще делает программа](#что-вообще-делает-программа)
+2. [Полный жизненный цикл данных](#полный-жизненный-цикл-данных)
+3. [Как запустить](#как-запустить)
+4. [Структура проекта](#структура-проекта)
+5. [Система типов](#система-типов)
+6. [Хранение в памяти: Batch и DictColumn](#хранение-в-памяти-batch-и-dictcolumn)
+7. [Дисковый формат `.columnar`](#дисковый-формат-columnar)
+8. [Чтение: mmap и readahead](#чтение-mmap-и-readahead)
+9. [Исполнительный движок: Volcano-модель](#исполнительный-движок-volcano-модель)
+10. [Операторы](#операторы)
+11. [Выражения](#выражения)
+12. [Скалярные функции](#скалярные-функции)
+13. [Агрегация (HashAggregate подробно)](#агрегация-hashaggregate-подробно)
+14. [HashMap и SplitMix64](#hashmap-и-splitmix64)
+15. [SIMD](#simd)
+16. [RE2 для регулярных выражений](#re2-для-регулярных-выражений)
+17. [Как собираются 43 запроса](#как-собираются-43-запроса)
+18. [Запись результата](#запись-результата)
+19. [Сборка (CMake)](#сборка-cmake)
+20. [Тесты](#тесты)
+21. [Результаты на ClickBench](#результаты-на-clickbench)
+
+---
+
+## Что вообще делает программа
+
+Есть два исполняемых файла:
+
+- **`csv_to_columnar`** — берёт CSV-файл с данными (`hits.csv`) + файл со схемой (`hits.schema`), и записывает их в свой бинарный колоночный формат `.columnar`. Это делается один раз.
+
+- **`clickbench_run`** — читает `.columnar` файл и выполняет на нём 43 запроса ClickBench, записывая результат каждого запроса в отдельный CSV (`q00.csv` ... `q42.csv`).
+
+Идея колоночного хранения: в аналитических запросах обычно нужны не все 105 колонок, а 2-3. Если хранить данные построчно (как в CSV), для подсчёта `COUNT(*) WHERE AdvEngineID <> 0` пришлось бы прочитать весь файл. В колоночном формате каждая колонка лежит отдельным непрерывным блоком, поэтому читается только нужная колонка `AdvEngineID` — остальные 104 не трогаются.
+
+---
+
+## Полный жизненный цикл данных
+
+Проследим путь одной строки `hits` от CSV до результата запроса.
+
+### Шаг 1. CSV → columnar (конвертация)
+
+`hits.csv` — это 100 млн строк вида:
+```
+7091626910923651030,1,"Заголовок страницы",1,"2013-07-02 00:16:46","2013-07-02",40367,...
+```
+
+`csv_to_columnar`:
+1. Читает `hits.schema` — список из 105 пар `(имя_колонки, тип)`.
+2. Читает CSV построчно (`getline` + 4 MB буфер).
+3. Накапливает строки в `Batch` — 65536 строк за раз.
+4. Когда батч заполнен, `ColumnarWriter` записывает его на диск: каждая колонка — отдельным блоком, с выбором кодировки (Plain / Dict / RLE).
+5. В конце пишет footer: схему + позиции (offset, size, encoding) всех блоков.
+
+### Шаг 2. Исполнение запроса
+
+Возьмём Q1: `SELECT COUNT(*) FROM hits WHERE AdvEngineID <> 0`.
+
+В коде это собирается как дерево операторов:
+```
+Scan(["AdvEngineID"])  →  Filter(AdvEngineID != 0)  →  HashAggregate(COUNT)  →  Project(count)
+```
+
+Исполнение идёт «снизу вверх», но управляется «сверху вниз» — верхний оператор тянет данные у нижнего методом `Next()`:
+
+1. **Project.Next()** просит данные у **HashAggregate**.
+2. **HashAggregate.Next()** в цикле тянет все батчи у **Filter**, считая строки.
+3. **Filter.Next()** тянет батч у **Scan**, вычисляет предикат `AdvEngineID != 0`, оставляет только подходящие строки (через selection vector — без копирования).
+4. **Scan.Next()** читает с диска один батч колонки `AdvEngineID` (только её, остальные 104 колонки не читаются).
+
+### Шаг 3. Результат
+
+`HashAggregate` собрал одну группу с `count = 14174`. `Project` оставил колонку `count`. Результат записывается в `q01.csv`:
+```
+count
+14174
+```
+
+---
+
+## Как запустить
+
+### Зависимости
+
+```bash
+bash script/setup.sh
+# ставит: git build-essential cmake g++ libre2-dev
+```
 
 ### Сборка
 
@@ -18,625 +105,671 @@ C++23, CMake, GoogleTest. Без внешних зависимостей.
 bash script/build.sh
 ```
 
-Бинари появятся в `build/build/Release/`.
+Бинари: `build/build/Release/{csv_to_columnar, clickbench_run, ColumnarDB}`.
 
-### Конвертация CSV в columnar-формат
-
-```bash
-bash script/convert.sh <input.csv> <output.columnar>
-```
-
-Или напрямую:
+### Конвертация
 
 ```bash
 ./build/build/Release/csv_to_columnar \
-  --input hits.csv \
-  --schema hits.schema \
-  --output hits.columnar
+  --input hits.csv --schema hits.schema --output hits.columnar
 ```
 
-### Запуск всех запросов
+### Все 43 запроса
 
 ```bash
 ./build/build/Release/clickbench_run \
-  --input hits.columnar \
-  --output_dir results/
+  --input hits.columnar --output_dir results/
 ```
 
-Результаты — CSV-файлы `q00.csv` ... `q42.csv`.
+Результаты — `results/q00.csv` ... `results/q42.csv`.
 
-### Запуск одного запроса
+### Один запрос
 
 ```bash
 ./build/build/Release/clickbench_run \
-  --input hits.columnar \
-  --output_dir results/ \
-  --queries=7
+  --input hits.columnar --output_dir results/ --queries=7
 ```
 
-### Запуск через скрипты (для Docker/CI)
+### Через скрипты (для CI / Docker)
 
 ```bash
-bash script/setup.sh              # зависимости
-bash script/build.sh              # сборка
-bash script/convert.sh <csv> <columnar>  # конвертация
-bash script/run_query.sh <N> <columnar> <output.csv> <log>  # один запрос
+bash script/setup.sh                                # зависимости
+bash script/build.sh                                # сборка
+bash script/convert.sh <csv> <columnar>             # конвертация
+bash script/run_query.sh <N> <columnar> <out> <log> # один запрос N
 ```
 
 ### Тесты
 
 ```bash
-cd build/build/Release
-ctest
+cd build/build/Release && ctest
 ```
-
-80 unit-тестов: типы, парсинг, roundtrip columnar, все операторы и выражения.
 
 ---
 
-## Архитектура
-
-### Обзор
-
-```
-hits.csv
-   |
-   v
-csv_to_columnar  ──>  hits.columnar  (колоночный бинарный формат)
-                            |
-                            v
-                     clickbench_run   (исполнение 43 запросов)
-                            |
-                            v
-                      q00.csv ... q42.csv
-```
-
-Система состоит из четырёх уровней:
-
-1. **Storage** — колоночный бинарный формат (чтение/запись)
-2. **Batch** — единица данных в памяти (набор колонок фиксированного размера)
-3. **Execution engine** — pull-based volcano model (операторы + выражения)
-4. **Query runner** — захардкоженные планы 43 запросов ClickBench
-
-### Структура директорий
+## Структура проекта
 
 ```
 src/
   utils/
-    utils.h          — Trim, Seek и прочие утилиты
-    parse.h          — парсинг целых, float, Date, DateTime из строк
-    hash_map.h       — open-addressing hash map (quadratic probing)
+    utils.h          — DataType, DataObject, DataVector, Trim, Seek
+    parse.h          — парсинг int/float/Date/DateTime и их форматирование
+    hash_map.h       — кастомная open-addressing hash map
+    simd.h           — AVX2-обёртки (сравнение и арифметика int64/double)
   csv/
-    csvreader.h/cpp  — чтение CSV (RFC 4180)
-    csvwriter.h/cpp  — запись CSV
+    csvreader.{h,cpp} — чтение CSV (RFC 4180: кавычки, экранирование)
+    csvwriter.{h,cpp} — запись CSV
   schema/
-    schema.h         — DataType enum, ColumnSchema, Schema, LoadSchemaCsv
+    schema.h         — ColumnSchema, Schema, загрузка/сохранение схемы
   engine/
     batch/
-      batch.h/cpp    — Batch (колоночное хранение в памяти)
+      batch.{h,cpp}      — Batch (набор колонок в памяти) + CsvBatchReader
+      dict_column.h      — DictColumn (dictionary-encoded строки)
     columnar/
-      columnar_format.h    — константы формата (magic, version)
-      columnar_writer.h/cpp — запись .columnar файлов
-      columnar_reader.h/cpp — чтение через mmap + readahead
+      columnar_format.h    — константы формата, BatchMeta, Encoding
+      columnar_writer.{h,cpp} — запись .columnar
+      columnar_reader.{h,cpp} — чтение через mmap
     exec/
       operator.h     — базовый класс Operator
       exec_batch.h   — ExecBatch (Batch* + selection vector)
-      expr.h/cpp     — базовый класс Expr + фабрики
-      exprs/         — конкретные выражения (7 типов)
-      filter.h       — оператор Filter
+      expr.{h,cpp}   — базовый класс Expr + фабрики Make*
+      exprs/         — конкретные выражения (column, compare, arith, ...)
       scan.h         — оператор Scan
+      filter.h       — оператор Filter
       project.h      — оператор Project
-      hash_aggregate.h/cpp — оператор HashAggregate
-      sort.h         — оператор Sort (с LIMIT/OFFSET)
-      topk.h         — оператор TopK (heap-based)
+      hash_aggregate.{h,cpp} — оператор HashAggregate
+      sort.h         — оператор Sort
+      topk.h         — оператор TopK
       limit.h        — оператор Limit
-      func.h/cpp     — реестр скалярных функций
+      func.{h,cpp}   — реестр скалярных функций (length, like, extract, ...)
 bench/
-  clickbench_run.cpp — 43 захардкоженных плана запросов + main
+  clickbench_run.cpp — 43 захардкоженных плана + main
 exe/
   csv_to_columnar.cpp — конвертер CSV → columnar
+main.cpp             — вспомогательный CLI (to-columnar / to-csv)
 tests/
-  test_types.cpp     — тесты типов и парсинга
-  test_roundtrip.cpp — тесты columnar read/write roundtrip
-  test_exec.cpp      — тесты операторов и выражений
+  test_types.cpp     — типы и парсинг
+  test_roundtrip.cpp — columnar write → read даёт исходные данные
+  test_exec.cpp      — операторы и выражения
+hits.schema          — схема таблицы hits (105 колонок)
 ```
 
 ---
 
 ## Система типов
 
-### DataType (13 типов)
+### DataType — типы колонок (13 штук)
 
 ```cpp
-enum class DataType {
-    Int8, Int16, Int32, Int64,
+enum class DataType : uint8_t {
+    Int64, String, Int8, Int16, Int32,
     UInt8, UInt16, UInt32, UInt64,
-    Float32, Float64,
-    String, Date, DateTime
+    Float32, Float64, Date, DateTime
 };
 ```
 
-**Date** хранится как `int32_t` — количество дней с 1970-01-01.
-**DateTime** хранится как `int64_t` — количество секунд с epoch.
+- **Date** хранится как `int32` — число дней с 1970-01-01.
+- **DateTime** хранится как `int64` — число секунд с epoch.
 
-### DataVector
+Типы читаются из `hits.schema` (CSV `имя,тип`). Парсинг типа — `ParseColumnType` в `schema.h` (`"int64"` → `DataType::Int64`, плюс алиасы `timestamp`→DateTime, `char`→String).
+
+### DataVector — одна колонка в памяти
 
 ```cpp
 using DataVector = std::variant<
     std::vector<int8_t>, std::vector<int16_t>, ...,
     std::vector<double>,
-    DictColumn
+    DictColumn        // для строк
 >;
 ```
 
-Каждая колонка в `Batch` — это один `DataVector`. Числовые колонки хранятся как `vector<T>`, строковые — как `DictColumn` (dictionary encoding в памяти). Тип определяется схемой.
+Числовые колонки — обычный `std::vector<T>`. Строковые — `DictColumn` (dictionary encoding, см. ниже).
 
-### DictColumn (dictionary-encoded строки)
+### EvalType — типы на этапе исполнения (7 штук)
 
-```cpp
-class DictColumn {
-    std::deque<std::string> dict_;          // уникальные строки
-    std::vector<uint32_t> codes_;           // индекс в dict_ для каждой строки
-    HashMap<string_view, uint32_t> index_;  // обратный индекс (string → id)
-};
-```
-
-Вместо `vector<string>` (где "iPad" повторяется 1M раз = 1M аллокаций × ~5 байт) — одна копия "iPad" в словаре + 1M × 4 байта codes. Экономия памяти 5-10× на повторяющихся строках.
-
-- `push_back(s)` — O(1) amortized: проверяет index_, добавляет в dict_ если новая
-- `operator[](i)` — O(1): `dict_[codes_[i]]`
-- `code_at(i)` — O(1): прямой доступ к коду (для hash aggregate)
-- `deque` вместо `vector` для dict_ — элементы не перемещаются при росте, string_view в index_ остаются валидны
-
-### EvalType (уровень исполнения)
+При вычислении выражений узкие типы расширяются до широких, чтобы не плодить кодовые пути:
 
 ```cpp
 enum class EvalType { I64, U64, F64, Str, Bool, Date, DateTime };
 ```
 
-При исполнении все узкие типы расширяются:
-- `Int8/Int16/Int32/Int64` → `I64` (vector<int64_t>)
-- `UInt8/.../UInt64` → `U64` (vector<uint64_t>)
-- `Float32/Float64` → `F64` (vector<double>)
-- `Date` → `Date` (хранится как int64, но помечен типом Date)
-- `DateTime` → `DateTime` (хранится как int64)
-- `Bool` → vector<uint8_t> (результат сравнений и логических операций)
+- `Int8/16/32/64` → `I64` (всё считается в `int64`)
+- `UInt8/16/32/64` → `U64`
+- `Float32/64` → `F64`
+- `Date`, `DateTime` хранятся как `int64`, но помечены своим EvalType (чтобы при выводе отформатировать как дату)
+- `Bool` — результат сравнений и логики, хранится как `vector<uint8_t>`
 
-### EvalCol
+### EvalCol — результат вычисления выражения
 
 ```cpp
 using EvalCol = std::variant<
     std::vector<int64_t>, std::vector<uint64_t>,
     std::vector<double>, std::vector<std::string>,
-    std::vector<uint8_t>
+    std::vector<uint8_t>   // Bool
 >;
 ```
 
-Результат вычисления выражения — один столбец значений.
+Любое выражение `eval()` возвращает один столбец значений в одном из этих пяти представлений.
 
 ---
 
-## Колоночный формат (.columnar) — версия 3
+## Хранение в памяти: Batch и DictColumn
 
-### Структура файла
+### Batch
 
-```
-┌──────────────────────┐
-│ Header (16 bytes)    │  magic "CDB1" + version(3) + footer_offset
-├──────────────────────┤
-│ Batch 0              │
-│   Column 0 data      │  encoding выбирается per-column, per-batch
-│   Column 1 data      │
-│   ...                │
-├──────────────────────┤
-│ Batch 1              │
-│   ...                │
-├──────────────────────┤
-│ Footer               │  schema + batch metadata (offset, size, encoding)
-└──────────────────────┘
+`Batch` — это набор колонок одинаковой длины + их схема:
+
+```cpp
+class Batch {
+    Schema schema_;
+    std::vector<DataVector> columns_;
+    std::size_t row_count_;
+};
 ```
 
-- **Батч** = 65536 строк. Данные каждой колонки записываются последовательно.
-- **Числовые колонки**: Plain или RLE (writer выбирает меньший).
-- **String колонки**: всегда Dict.
+Размер батча — 65536 строк. Весь движок работает батчами: Scan читает батч, Filter фильтрует батч, и т.д. Это компромисс между построчной обработкой (много overhead на вызовы) и обработкой всей таблицы сразу (не влезет в память / cache).
 
-### Encoding: Plain
+### DictColumn — dictionary encoding строк
 
-```
-[raw bytes: sizeof(T) * nrows]
-```
+Прямолинейное хранение строк — `vector<string>` — расточительно: в колонке `URL` строка `http://example.com` может повторяться миллионы раз, и каждая копия — отдельная аллокация.
 
-Просто массив значений. Используется для числовых колонок где RLE не даёт экономии.
+`DictColumn` хранит каждую уникальную строку **один раз**:
 
-### Encoding: Dict (строковые колонки)
-
-```
-┌──────────────────────┐
-│ dict_size (uint32)   │  кол-во уникальных строк в батче
-├──────────────────────┤
-│ len0 (uint32)        │  длина строки 0 в словаре
-│ data0 (bytes)        │
-│ len1 (uint32)        │
-│ data1 (bytes)        │
-│ ...                  │
-├──────────────────────┤
-│ codes (uint32[nrows])│  индекс в словаре для каждой строки
-└──────────────────────┘
+```cpp
+class DictColumn {
+    std::deque<std::string> dict_;          // уникальные строки (словарь)
+    std::vector<uint32_t> codes_;           // для каждой строки — индекс в словаре
+    HashMap<string_view, uint32_t> index_;  // обратный индекс: строка → код
+};
 ```
 
-Если в батче 65536 строк но только 5000 уникальных — храним 5000 строк + 65536 × 4 байта кодов.
+- `operator[](i)` → `dict_[codes_[i]]` — O(1)
+- `push_back(s)` — ищет `s` в `index_`; если есть, добавляет код, иначе создаёт новую запись в словаре. O(1) в среднем.
 
-### Encoding: RLE (числовые колонки с повторами)
+Почему `std::deque`, а не `vector` для словаря: `index_` хранит `string_view`, указывающие на строки в `dict_`. У `vector` при росте происходит реаллокация и все `string_view` становятся висячими. У `deque` элементы не двигаются при добавлении — указатели остаются валидными.
+
+**Эффект:** на колонках с повторами (URL, Title, SearchPhrase) — экономия памяти в 5-10 раз. Дополнительно: dictionary encoding бесплатно ускоряет `GROUP BY` по строкам — группировка идёт по `uint32` кодам, а не по самим строкам.
+
+---
+
+## Дисковый формат `.columnar`
+
+Версия 3. Magic-байты `"CDB1"`.
+
+### Общая структура файла
 
 ```
-┌──────────────────────┐
-│ num_runs (uint32)    │
-├──────────────────────┤
-│ value_0 (T)          │  значение run'а 0
-│ count_0 (uint32)     │  сколько подряд
-│ value_1 (T)          │
-│ count_1 (uint32)     │
-│ ...                  │
-└──────────────────────┘
+┌──────────────────────────┐
+│ Header (16 байт)          │  "CDB1" + version(uint32) + footer_offset(uint64)
+├──────────────────────────┤
+│ Batch 0                   │
+│   Column 0 (encoded)      │  кодировка выбирается per-column, per-batch
+│   Column 1 (encoded)      │
+│   ...                     │
+├──────────────────────────┤
+│ Batch 1                   │
+│   ...                     │
+├──────────────────────────┤
+│ ...                       │
+├──────────────────────────┤
+│ Footer                    │  схема + метаданные всех батчей
+└──────────────────────────┘
 ```
 
-Writer считает `runs` и сравнивает `rle_size = 4 + runs * (sizeof(T) + 4)` с `plain_size = nrows * sizeof(T)`. Если RLE меньше — пишет RLE, иначе Plain.
-
-Эффективно для колонок где много подряд идущих одинаковых значений (EventDate, Sex, IsRefresh и т.д.).
+`footer_offset` в заголовке указывает где начинается footer. Сначала пишется 0 (плейсхолдер), а в конце — патчится реальное значение через seek.
 
 ### Footer
 
-Для каждого chunk в footer хранится:
-- `offset: uint64` — позиция в файле
-- `size: uint64` — размер в байтах
-- `encoding: uint8` — 0 = Plain, 1 = Dict, 2 = RLE
+```
+ncols (uint32)
+для каждой колонки:
+    name (uint32 длина + байты)
+    type (uint8)
+nbatches (uint32)
+для каждого батча:
+    row_count (uint32)
+    для каждой колонки:
+        offset (uint64)    — где блок начинается в файле
+        size (uint64)      — длина блока в байтах
+        encoding (uint8)   — 0=Plain, 1=Dict, 2=RLE
+```
 
-### Экономия места
+Footer читается первым (через `footer_offset`), это даёт reader'у карту всех блоков. После этого любой блок читается одним seek'ом.
 
-На полном hits.csv (75 GB raw):
-- Plain only: ~45 GB
-- + Dict: ~30 GB (-33%)
-- + RLE: **~23 GB** (-49%)
+### Кодировка Plain (числовые колонки без повторов)
 
-### Чтение (mmap + readahead)
+```
+[raw bytes: sizeof(T) * row_count]
+```
 
-`ColumnarReader` маппит весь файл через `mmap(PROT_READ, MAP_PRIVATE)`.
+Просто массив значений как есть. Используется когда RLE не даёт выигрыша.
 
-- **Plain**: `memcpy` из mapped-региона в `vector<T>`
-- **Dict**: читает словарь + `memcpy` кодов → формирует `DictColumn`
-- **RLE**: разворачивает (value, count) пары в `vector<T>`
-- Перед чтением батча N вызывается `readahead(fd, offset, size)` для батча N+1 — ядро асинхронно подгружает страницы с диска
+### Кодировка Dict (все строковые колонки)
 
-Проекция колонок: если запрос использует 3 из 105 колонок — читаются только они. Остальные колонки не трогаются (seek через mmap offset).
+```
+dict_size (uint32)              — число уникальных строк в батче
+для каждой строки словаря:
+    len (uint32) + байты
+codes (uint32 * row_count)      — код каждой строки
+```
+
+Это тот же dictionary encoding что и в памяти, сериализованный на диск.
+
+### Кодировка RLE (числовые колонки с повторами)
+
+```
+num_runs (uint32)
+для каждого run'а:
+    value (T)
+    count (uint32)              — сколько раз value повторяется подряд
+```
+
+Writer считает число run'ов и сравнивает:
+```
+rle_size   = 4 + num_runs * (sizeof(T) + 4)
+plain_size = row_count * sizeof(T)
+```
+Если RLE компактнее — пишет RLE, иначе Plain. Решение принимается отдельно для каждой колонки каждого батча.
+
+RLE отлично работает на колонках, отсортированных или с низкой кардинальностью: `EventDate` (события одного дня идут подряд), `Sex`, `IsRefresh`, `AdvEngineID` (часто 0).
+
+### Экономия места на полном hits (75 GB исходного CSV)
+
+| Конфигурация | Размер |
+|---|---|
+| Plain (всё как есть) | ≈45 GB |
+| + Dict для строк | ≈30 GB |
+| + RLE для чисел | **≈23 GB** |
 
 ---
 
-## Execution Engine
+## Чтение: mmap и readahead
 
-### Pull-based Volcano Model
+`ColumnarReader` не использует `fread`/`ifstream` для данных. Вместо этого он маппит весь файл в адресное пространство:
 
-Каждый оператор реализует интерфейс:
+```cpp
+fd_ = open(path, O_RDONLY);
+mapped_ = mmap(nullptr, file_size, PROT_READ, MAP_PRIVATE, fd_, 0);
+```
+
+Теперь файл доступен как обычный массив байт `mapped_[offset]`. Операционная система сама подгружает страницы с диска по мере обращения (page fault) и кэширует их.
+
+**Чтение колонки** = `memcpy` из mmap-региона в `DataVector` (для Plain), либо разворачивание Dict/RLE. Это одна копия (kernel page cache → наш vector), без промежуточного буфера ifstream.
+
+**Проекция:** `Scan` читает только нужные колонки. Если запрос использует 2 из 105 колонок, остальные 103 блока в файле просто не трогаются — соответствующие страницы даже не загружаются с диска.
+
+**Readahead (упреждающее чтение):** перед чтением батча N оператор Scan просит ядро асинхронно подгрузить батч N+1:
+
+```cpp
+readahead(fd_, chunk.offset, chunk.size);
+```
+
+Пока операторы обрабатывают батч N (CPU-работа), диск параллельно читает батч N+1. Когда дойдём до N+1 — данные уже в page cache, обращение мгновенное. Получается перекрытие I/O и вычислений (software pipelining).
+
+---
+
+## Исполнительный движок: Volcano-модель
+
+Классическая pull-based (тянущая) модель. Каждый оператор реализует интерфейс:
 
 ```cpp
 class Operator {
-    virtual std::optional<ExecBatch> Next() = 0;
-    virtual const Schema& OutputSchema() const = 0;
+    virtual std::optional<ExecBatch> Next() = 0;     // выдать следующий батч (или nullopt)
+    virtual const Schema& OutputSchema() const = 0;  // схема того, что выдаёт
 };
 ```
 
-Вызывающий код тянет данные вызовом `Next()`. Оператор возвращает один батч за вызов, `nullopt` когда данные кончились.
+Запрос — дерево операторов. Чтобы получить результат, вызывают `Next()` у корня. Корень вызывает `Next()` у своего ребёнка, тот у своего, и так до листа (Scan). Данные «текут» снизу вверх по одному батчу.
 
-**ExecBatch** = указатель на Batch + опциональный selection vector:
+### ExecBatch и selection vector
+
+Оператор выдаёт не сам Batch, а лёгкую обёртку:
 
 ```cpp
 struct ExecBatch {
-    const Batch* batch;
-    std::vector<uint32_t> sel;  // если пустой — все строки активны
+    const Batch* batch;            // указатель на данные (не владеет)
+    std::vector<uint32_t> sel;     // индексы активных строк; пустой = все строки
 };
 ```
 
-Selection vector (`sel`) содержит индексы активных строк в батче. Filter заполняет sel, а не копирует данные — zero-copy фильтрация.
-
-### Операторы (7 штук)
-
-Все операторы наследуют `Operator`:
+**Selection vector** — ключевая оптимизация. Когда Filter отсеивает строки, он **не копирует** прошедшие строки в новый Batch. Вместо этого он формирует `sel` — список индексов строк, которые прошли фильтр:
 
 ```
-Operator (abstract)
-  ├── Scan        — читает батчи из ColumnarReader
-  ├── Filter      — фильтрует строки по предикату (Bool-выражение)
-  ├── Project     — вычисляет новые колонки из выражений
-  ├── HashAggregate — GROUP BY + агрегатные функции
-  ├── Sort        — полная сортировка (с LIMIT/OFFSET)
-  ├── TopK        — top-K через min-heap (для ORDER BY + LIMIT)
-  └── Limit       — ограничение числа строк
+batch:  [10, 0, 25, 0, 7, 0, 13]   ← колонка AdvEngineID
+sel:    [0, 2, 4, 6]                ← индексы где значение != 0
 ```
 
-#### Scan
+Операторы выше работают только по этим индексам. Данные остаются на месте — zero-copy фильтрация. Если `sel` пустой, значит активны все строки батча (быстрый путь без индирекции).
 
-Читает данные из `ColumnarReader`. Три конструктора:
+### Почему батчи, а не строки
 
-```cpp
-Scan(reader)                              // все колонки
-Scan(reader, vector<size_t>{0, 3})        // по индексам
-Scan(reader, vector<string>{"URL", "UserID"})  // по именам
-```
-
-Каждый вызов `Next()` читает один батч. Перед чтением вызывает `Prefetch()` для следующего батча.
-
-#### Filter
-
-Принимает дочерний оператор и предикат (Expr с result_type == Bool).
-На каждый батч:
-1. Вычисляет предикат → vector<uint8_t> маска
-2. Собирает sel из индексов где маска = 1
-3. Возвращает ExecBatch с sel (без копирования данных)
-
-Если все строки отфильтрованы — пропускает батч и тянет следующий.
-
-#### Project
-
-Принимает список пар `{имя, выражение}`. На каждый батч вычисляет каждое выражение, формирует новый Batch с новой схемой.
-
-#### HashAggregate
-
-GROUP BY + агрегатные функции. Блокирующий оператор — читает все данные при первом `Next()`.
-
-Два пути исполнения:
-- **Fast path** (≤4 ключа, без float): ключи упаковываются в `FastKeyN<N>` (8×N байт). Строковые ключи приходят уже dictionary-encoded из `DictColumn`, их коды (uint32 → int64) кладутся прямо в `FastKeyN`. Hash-таблица: custom `HashMap` с open-addressing и quadratic probing.
-- **Generic path** (>4 ключа или float): ключи как `vector<variant<int64,uint64,double,string,uint8>>`, hash-таблица: `std::unordered_map`.
-
-Агрегатные функции (6 видов):
-
-```
-GroupAgg (abstract)
-  ├── CountStarAgg    — COUNT(*)
-  ├── SumAgg<T>       — SUM(expr)
-  ├── MinMaxAgg<T>    — MIN/MAX(expr)
-  ├── AvgAgg<T>       — AVG(expr) = SUM/COUNT
-  └── CountDistinctAgg<T> — COUNT(DISTINCT expr) через unordered_set<T>
-```
-
-Каждый агрегат хранит состояние для каждой группы (например `vector<uint64_t> counts_` для CountStar). Метод `UpdateBatch(gids, ctx)` обновляет состояние по вектору group-id для каждой строки батча.
-
-Для скалярных агрегатов (без GROUP BY) используется синтетический ключ `__zero = 0` — все строки попадают в одну группу.
-
-**Runtime Dictionary Encoding (string interning)**:
-Строковые ключи GROUP BY не хранятся в hash-таблице напрямую. Вместо этого каждая уникальная строка кладётся в `deque<string>` (string pool) и получает uint32 id. В ключах hash-таблицы хранится id (8 байт) вместо строки (~50 байт). При выдаче результата id разворачивается обратно в строку.
-
-#### Sort
-
-Полная сортировка. Блокирующий оператор — накапливает все батчи в один, сортирует по ключам, применяет LIMIT/OFFSET.
-
-```cpp
-Sort(child, keys, limit=MAX, offset=0)
-```
-
-Внутри: stable_sort по индексам, gather результата по отсортированным индексам.
-
-#### TopK
-
-Heap-based top-K. Для ORDER BY + LIMIT без OFFSET. Эффективнее Sort когда K << N (не нужно сортировать весь массив).
-
-Для каждой строки: если лучше worst в heap → заменить worst, push_heap. В конце sort heap для финального порядка.
-
-#### Limit
-
-Простой оператор — возвращает первые N строк и останавливается.
-
-### Tiebreakers
-
-Для детерминированных результатов при ORDER BY + LIMIT, все ключи сортировки автоматически дополняются всеми колонками output schema как вторичные ключи (ASC). Это делается в `AppendTiebreakers()`.
+Если бы `Next()` выдавал по одной строке, на 100 млн строк было бы 100 млн виртуальных вызовов через всю цепочку операторов — это сотни миллионов indirect jumps. Батч в 65536 строк амортизирует этот overhead в 65 тысяч раз: один `Next()` = обработка 65536 строк в тесном цикле (который ещё и SIMD-векторизуется).
 
 ---
 
-## Выражения (Expr)
+## Операторы
 
-### Базовый класс
+Все наследуют `Operator`. Их семь:
+
+```
+Operator (абстрактный)
+├── Scan          — источник: читает батчи из ColumnarReader
+├── Filter        — отсеивает строки по предикату (Bool-выражению)
+├── Project       — вычисляет новые колонки из выражений
+├── HashAggregate — GROUP BY + агрегатные функции
+├── Sort          — полная сортировка (+ LIMIT/OFFSET)
+├── TopK          — top-K строк через min-heap (для ORDER BY + LIMIT)
+└── Limit         — первые N строк
+```
+
+### Scan
+
+Лист дерева, источник данных. Три способа указать какие колонки читать:
+
+```cpp
+Scan(reader)                           // все колонки
+Scan(reader, {0, 3, 7})                // по индексам
+Scan(reader, {"URL", "UserID"})        // по именам
+```
+
+Каждый `Next()` читает один следующий батч (через `ColumnarReader::ReadBatchColumns`), предварительно запустив `readahead` для следующего. Когда батчи кончились — возвращает `nullopt`.
+
+### Filter
+
+Принимает дочерний оператор и предикат (выражение с `result_type() == Bool`). На каждый батч:
+1. Вычисляет предикат → маска `vector<uint8_t>`.
+2. Собирает `sel` из индексов где маска = 1.
+3. Возвращает ExecBatch с этим `sel` (данные не копируются).
+
+Если после фильтра не осталось строк — берёт следующий батч (не выдаёт пустой).
+
+### Project
+
+Принимает список пар `{имя, выражение}`. На каждый батч вычисляет каждое выражение и формирует **новый** Batch с новой схемой. Используется для `SELECT a, b+1, length(c)` — то есть когда колонки на выходе отличаются от входных.
+
+### Sort
+
+Блокирующий оператор: при первом `Next()` вытягивает **все** батчи ребёнка в один большой Batch, сортирует, применяет LIMIT/OFFSET. Сортировка — `std::stable_sort` по вектору индексов (не двигая сами данные), потом материализация результата по отсортированным индексам.
+
+Поддерживает несколько ключей сортировки с направлением (ASC/DESC) для каждого.
+
+### TopK
+
+Для `ORDER BY ... LIMIT k` без OFFSET. Эффективнее полного Sort когда `k` мало: вместо сортировки всех 100M строк держит min-heap размера `k`. Для каждой строки: если она «лучше» худшей в heap — заменяет худшую. В конце heap сортируется для финального порядка. Сложность O(n log k) вместо O(n log n).
+
+### Limit
+
+Простой: выдаёт первые N строк и дальше возвращает `nullopt`.
+
+### Tiebreakers (детерминизм результата)
+
+При `ORDER BY count LIMIT 10`, если у многих групп одинаковый `count`, какие именно 10 попадут в результат — формально не определено. Чтобы результат был воспроизводимым, `AddSort`/`AddTopK` автоматически дописывают **все** колонки выходной схемы как вторичные ключи сортировки (ASC). Это делает выбор top-N каноническим.
+
+---
+
+## Выражения
+
+Выражение вычисляет одну колонку значений из батча. Базовый класс:
 
 ```cpp
 class Expr {
     virtual EvalType result_type() const = 0;
-    virtual EvalCol eval(const EvalContext& ctx) const = 0;
+    virtual EvalCol eval(const EvalContext&) const = 0;
 };
 ```
 
-`EvalContext` = указатель на Batch + указатель на selection vector.
+`EvalContext` = указатель на Batch + опциональный selection vector. Метод `rows()` возвращает число активных строк.
 
-### Иерархия выражений
+### Восемь видов выражений
 
 ```
-Expr (abstract)
-  ├── ColumnExpr     — читает колонку из батча по индексу
-  ├── ConstExpr<T>   — возвращает вектор из N одинаковых значений
-  ├── CompareExpr    — сравнение двух выражений (Eq, Ne, Lt, Le, Gt, Ge)
-  ├── ArithExpr      — арифметика (Add, Sub, Mul, Div, Mod)
-  ├── LogicalExpr    — логика (And, Or, Not)
-  ├── InListExpr     — IN (value_list)
-  ├── IfExpr         — CASE WHEN / IF-THEN-ELSE
-  └── FuncCallExpr   — вызов скалярной функции
+Expr (абстрактный)
+├── ColumnExpr    — читает колонку из батча по индексу
+├── ConstExpr<T>  — константа (вектор из N одинаковых значений)
+├── CompareExpr   — сравнение: Eq, Ne, Lt, Le, Gt, Ge
+├── ArithExpr     — арифметика: Add, Sub, Mul, Div, Mod
+├── LogicalExpr   — логика: And, Or, Not
+├── InListExpr    — IN (список констант)
+├── IfExpr        — CASE WHEN cond THEN x ELSE y
+└── FuncCallExpr  — вызов скалярной функции (length, like, ...)
 ```
 
-### Фабрики (Factory functions)
+### Фабрики (factory functions)
 
-Выражения создаются через фабрики, а не напрямую. Это скрывает конкретные классы (они в anonymous namespace) и позволяет добавлять новые типы выражений без изменения заголовков:
+Конкретные классы выражений объявлены в `exprs/*.h` и не экспортируются. Создаются через фабрики из `expr.h`:
 
 ```cpp
-ExprPtr MakeColumn(const Schema& s, size_t idx);
 ExprPtr MakeColumnByName(const Schema& s, string_view name);
 ExprPtr MakeConstI64(int64_t v);
-ExprPtr MakeConstStr(string v);
 ExprPtr MakeCompare(ExprPtr l, CmpOp op, ExprPtr r);
 ExprPtr MakeArith(ExprPtr l, ArithOp op, ExprPtr r);
 ExprPtr MakeLogical(LogOp op, vector<ExprPtr> args);
 ExprPtr MakeInList(ExprPtr lhs, vector<ExprPtr> consts);
-ExprPtr MakeIf(ExprPtr cond, ExprPtr if_true, ExprPtr if_false);
+ExprPtr MakeIf(ExprPtr cond, ExprPtr t, ExprPtr f);
 ExprPtr MakeFuncCall(const string& name, vector<ExprPtr> args);
 ```
 
-`ExprPtr = unique_ptr<Expr>` — владение через move-семантику.
+`ExprPtr = unique_ptr<Expr>`. Дерево выражений владеет своими поддеревьями через `unique_ptr`.
+
+Зачем фабрики: пользователю (коду в clickbench_run.cpp) не нужно знать о классах `CompareExpr` и т.п. — он работает с абстрактным `Expr`. Конкретные реализации спрятаны в `.h` файлах папки `exprs/`, подключаемых только в `expr.cpp`.
 
 ### Промотирование типов
 
-При сравнении или арифметике двух разных числовых типов определяется общий тип через `CommonNumericType`:
-- Если один F64 → результат F64
-- I64 и U64 → F64 (потенциальная потеря точности, но безопасно)
-- I64 и I64 → I64
-- Date/DateTime считаются как I64
+Когда сравниваются/складываются два разных числовых типа, `CommonNumericType` определяет общий:
+- если хотя бы один `F64` → результат `F64`
+- `I64` и `U64` → `F64` (безопасно, без переполнения знака)
+- одинаковые → тот же тип
+- Date/DateTime трактуются как `I64`
 
-`CastEval<T>` конвертирует EvalCol в vector<T> через static_cast.
+`CastEval<T>(col)` приводит EvalCol к `vector<T>` через `static_cast`.
 
-### Выражения в файлах
+### Пример: как вычисляется `AdvEngineID <> 0`
 
 ```
-src/engine/exec/
-  expr.h          — публичный API (EvalType, EvalCol, Expr, фабрики)
-  expr.cpp        — реализация фабрик
-  exprs/
-    helpers.h     — CommonNumericType, CastEval, GatherCast, GatherString
-    column.h      — ColumnExpr, ConstExpr<T>
-    compare.h     — CompareExpr, CmpLoop, DispatchCmp
-    arith.h       — ArithExpr, ArithLoop
-    logical.h     — LogicalExpr (And/Or/Not)
-    in_list.h     — InListExpr
-    if.h          — IfExpr
+CompareExpr(Ne)
+├── ColumnExpr("AdvEngineID")   → читает колонку → vector<int64>
+└── ConstExpr(0)                → vector<int64>{0, 0, ...}
 ```
+`CompareExpr::eval` вычисляет оба ребёнка, приводит к общему типу (I64) и делает поэлементное `!=` (через SIMD) → `vector<uint8_t>` маска.
 
 ---
 
 ## Скалярные функции
 
-### Реестр функций (FuncRegistry)
-
-Singleton с перегрузками по имени и типам аргументов:
+Функции вроде `length`, `like`, `extract` зарегистрированы в синглтоне `FuncRegistry` с перегрузками по имени и типам аргументов:
 
 ```cpp
-FuncRegistry::Instance().Lookup("length", {EvalType::Str})
-  → ScalarFn { name, arg_types, result_type, impl }
+struct ScalarFn {
+    std::string name;
+    std::vector<EvalType> arg_types;
+    EvalType result_type;
+    std::function<EvalCol(const std::vector<EvalCol>&, size_t rows)> impl;
+};
 ```
 
-### Зарегистрированные функции
+`MakeFuncCall("like", args)` ищет подходящую перегрузку по типам аргументов и оборачивает в `FuncCallExpr`.
 
-| Функция | Аргументы | Результат | Описание |
-|---------|-----------|-----------|----------|
-| `length` | (Str) | I64 | Длина строки в байтах |
-| `like` | (Str, Str) | Bool | SQL LIKE с `%` и `_` |
-| `extract` | (Str, DateTime) | I64 | Извлечение year/month/day/hour/minute/second |
-| `date_trunc` | (Str, DateTime) | DateTime | Округление до minute/hour/day |
-| `regexp_replace` | (Str, Str, Str) | Str | Замена по regex (ECMAScript) |
+### Реализованные функции
+
+| Функция | Сигнатура | Описание |
+|---|---|---|
+| `length` | (Str) → I64 | длина строки в байтах |
+| `like` | (Str, Str) → Bool | SQL LIKE с `%` (любая подстрока) и `_` (один символ) |
+| `extract` | (Str, DateTime) → I64 | извлечь year/month/day/hour/minute/second |
+| `date_trunc` | (Str, DateTime) → DateTime | округлить вниз до minute/hour/day |
+| `regexp_replace` | (Str, Str, Str) → Str | замена по регулярке (через RE2) |
 
 ### LIKE-паттерн
 
-Реализация через итеративный алгоритм с backtracking:
-- `%` — любое количество символов
-- `_` — ровно один символ
-- Остальные — literal match
-
-Оптимизация: если паттерн одинаковый для всех строк батча (всегда при `LIKE '%google%'`), компилируется один раз.
+Реализован итеративным алгоритмом с backtracking (greedy match `%` с откатом). Оптимизация: если паттерн одинаковый для всех строк (а в ClickBench всегда — `LIKE '%google%'`), он анализируется один раз на батч, а не на каждую строку.
 
 ---
 
-## HashMap (custom)
+## Агрегация (HashAggregate подробно)
 
-Open-addressing hash map с quadratic probing. Файл: `src/utils/hash_map.h`.
+Самый сложный оператор. Реализует `GROUP BY` + агрегатные функции. Это **блокирующий** оператор: при первом `Next()` он прочитывает все данные ребёнка, и только потом отдаёт результат.
+
+### Агрегатные функции
+
+```
+GroupAgg (абстрактный)
+├── CountStarAgg        — COUNT(*)
+├── SumAgg<T>           — SUM(expr)
+├── MinMaxAgg<T>        — MIN/MAX(expr)
+├── AvgAgg<T>           — AVG = SUM/COUNT
+└── CountDistinctAgg<T> — COUNT(DISTINCT expr) через unordered_set
+```
+
+Каждый агрегат хранит состояние **по группам**. Например `CountStarAgg` — `vector<uint64_t> counts_`, где `counts_[g]` = число строк в группе `g`. Метод `UpdateBatch(gids, ctx)` получает для каждой строки батча номер её группы (`gids`) и обновляет состояние.
+
+### Как строится группировка
+
+```cpp
+HashMap<Key, uint32_t> map;   // ключ группы → номер группы
+uint32_t num_groups = 0;
+
+для каждого батча:
+    вычислить ключевые колонки
+    для каждой строки r:
+        собрать ключ k из значений ключевых колонок
+        если k нет в map:
+            gid = num_groups++       // новая группа
+            map[k] = gid
+            расширить состояние всех агрегатов
+        gids[r] = map[k]
+    обновить агрегаты по gids
+```
+
+Для скалярных агрегатов без `GROUP BY` (например `SELECT COUNT(*)`) используется синтетический ключ `__zero = 0` — все строки попадают в одну группу.
+
+### Два пути: быстрый и общий
+
+**Быстрый путь** (`ConsumeFastImpl<N>`) — когда ключей ≤ 4 и среди них нет float. Ключ упаковывается в `FastKeyN<N>` — это `std::array<int64_t, N>`, лежащий на стеке без аллокаций:
+
+```cpp
+template<std::size_t N>
+struct FastKeyN { std::array<int64_t, N> data; };
+```
+
+`N` выбирается по числу ключей (1, 2, 3 или 4), так что для `GROUP BY x` ключ занимает 8 байт, а не 32. Это критично для Q32 (`GROUP BY WatchID, ClientIP` — ~100M уникальных пар): меньше ключ → меньше памяти → запрос влезает в RAM.
+
+**Строки в быстром пути** обрабатываются через runtime dictionary encoding: каждая уникальная строка ключа интернируется в общий пул (`InternString`), и в `FastKeyN` кладётся её `uint32` код. Группировка идёт по числам.
+
+**Общий путь** (`Consume`) — когда ключей > 4 или есть float. Ключ — `vector<variant<...>>`, hash-таблица — наш `HashMap<GroupKey, uint32_t>`.
+
+### Сборка результата
+
+После обработки всех батчей формируется выходной Batch: для каждой группы пишутся значения ключей + результаты агрегатов (`agg->EmitInto(column)`).
+
+---
+
+## HashMap и SplitMix64
+
+`src/utils/hash_map.h`. Кастомная open-addressing хеш-таблица с квадратичным пробированием. Заточена под наш единственный use case: ключ → `uint32_t` (номер группы / код строки).
 
 ```cpp
 template<class Key, class Hash>
 class HashMap {
-    uint32_t* find(const Key& k);
-    void insert(const Key& k, uint32_t v);
-    void for_each(Fn fn) const;
+    uint32_t* find(const Key&);          // nullptr если нет
+    void insert(const Key&, uint32_t);
+    void for_each(Fn) const;
     void clear();
 };
 ```
 
 Особенности:
-- **Load factor ≤ 50%** — grow при `size * 2 >= capacity`
-- **Quadratic probing** — `(h + step*(step+1)/2) & mask` — избегает clustering
-- **Power-of-2 размер** — побитовый AND вместо модуля
-- **Только insert + find** — нет erase (не нужен для aggregate)
-- **Value всегда `uint32_t`** — sentinel `UINT32_MAX` = пустой слот (одна линия памяти на запись)
+- **Open-addressing** — все записи в одном плоском массиве (cache-friendly), без отдельных нод как в `std::unordered_map` (там каждая запись — отдельный `malloc` и прыжок по указателю).
+- **Quadratic probing**: при коллизии пробуем слоты `(h + 1), (h + 3), (h + 6), ...` — формула `(h + step*(step+1)/2) & mask`. Избегает первичной кластеризации линейного пробирования.
+- **Power-of-2 размер** → индекс через `& mask` вместо деления.
+- **Load factor ≤ 50%** — растём при заполнении на половину.
+- **Sentinel**: пустой слот помечен значением `UINT32_MAX`. Нет `erase` — он не нужен для агрегации.
 
-### Где используется
+### SplitMix64 — почему не std::hash
 
-| Место | Key | Что хранит |
-|---|---|---|
-| `HashAggregate::ConsumeFastImpl<N>` | `FastKeyN<N>` (≤4 int64) | group id |
-| `HashAggregate::Consume()` (generic) | `GroupKey` (variant вектор) | group id |
-| `HashAggregate::str_index_` | `string_view` | id в string pool |
-| `DictColumn::index_` | `string_view` | id в словаре батча |
+`std::hash<int64_t>` обычно тождественная — возвращает само число. Для последовательных ключей (а коды из dictionary encoding — это 0, 1, 2, 3, ...) при power-of-2 размере таблицы это даёт катастрофическую кластеризацию: все ключи ложатся в соседние слоты, пробирование вырождается в O(n).
 
-### SplitMix64 mixing
-
-Хеш-функция для интегральных ключей использует **SplitMix64** — три раунда `xor-shift + multiply`:
+Хеш-функция перемешивает биты алгоритмом SplitMix64 (три раунда xor-shift + умножение):
 
 ```cpp
 v ^= v >> 33;
-v *= 0xff51afd7ed558ccdULL;
+v *= 0xff51afd7ed558ccd;
 v ^= v >> 33;
-v *= 0xc4ceb9fe1a85ec53ULL;
+v *= 0xc4ceb9fe1a85ec53;
 v ^= v >> 33;
 ```
 
-Зачем: `std::hash<int64_t>` обычно тождественный — возвращает само число. При power-of-2 размере таблицы и последовательных id (0, 1, 2, ...) все ключи попадают в близкие buckets → кластеризация → O(n²) probe loops.
+Даёт идеальный avalanche: смена 1 бита на входе меняет ~50% битов на выходе. Соседние числа дают абсолютно разные хеши. Константы — те же, что в финализаторе MurmurHash3.
 
-SplitMix64 даёт идеальный avalanche: изменение 1 бита на входе → ~50% битов на выходе. Это критично когда ключи — id из dictionary encoding (всегда последовательные).
-
-Происхождение: автор Sebastiano Vigna (Java SplittableRandom). Константы — те же что в MurmurHash3 finalizer.
+Без этого один из запросов (`GROUP BY SearchPhrase` после интернирования) уходил в практически бесконечный probe loop.
 
 ---
 
 ## SIMD
 
-Для горячих циклов в выражениях используются AVX2-интринсики (`src/utils/simd.h`).
+`src/utils/simd.h`. AVX2-обёртки для горячих циклов в выражениях. Обрабатывают 4 значения `int64`/`double` за одну инструкцию.
 
-### Compare (4× int64 за такт)
+### Сравнение int64
 
 ```cpp
-__m256i a = _mm256_loadu_si256(...);
+__m256i a = _mm256_loadu_si256(...);   // загрузить 4 int64
 __m256i b = _mm256_loadu_si256(...);
-__m256i eq = _mm256_cmpeq_epi64(a, b);
+__m256i eq = _mm256_cmpeq_epi64(a, b); // поэлементное ==
 ```
 
-Реализованы `CmpEqI64`, `CmpGtI64`, `CmpLtF64` — используются в `compare.h::DispatchCmp` для типа int64. Six операторов сравнения (Eq, Ne, Lt, Le, Gt, Ge) выражаются через 2 базовых SIMD-операции (Eq и Gt) + xor для отрицания.
+Реализованы `CmpEqI64` и `CmpGtI64`. Все 6 операторов сравнения выражаются через них: Lt = Gt с обменом аргументов, Le/Ge/Ne = отрицание (xor с 1).
 
-### Arith (4× int64 / 4× double)
+### Арифметика
 
-`AddI64`, `SubI64`, `AddF64`, `SubF64`, `MulF64` — используются в `arith.h::ArithLoop`.
+`AddI64`, `SubI64` для целых; `AddF64`, `SubF64`, `MulF64` для double.
 
-### Эффект
+Подключены в `compare.h::DispatchCmp` (для int64) и `arith.h::ArithLoop` (int64 и double). Каждая функция имеет scalar tail для остатка `n % 4`.
 
-На полном hits (99M строк, батчи по 65K):
-- Compare-heavy запросы (Q1, Q19, Q36-Q42) — ускорение ~1.5-2×
-- Arith-heavy запросы (Q29 — 90 SUM(x+const), Q35 — 4 ClientIP-N) — ускорение ~2-3×
+### Где даёт эффект
 
-Все циклы имеют scalar tail для остатков (`n % 4 ≠ 0`).
+На полном hits (батчи по 65536):
+- фильтры по int-колонкам (Q1, Q19, Q36-Q42) — ускорение ~1.5-2×
+- арифметика (Q29 — 90 раз `SUM(ResolutionWidth + N)`, Q35 — `ClientIP - 1/2/3`) — ~2-3×
 
-Требования: процессор с AVX2 (Intel с 2013, AMD с 2015). Подключение через `-march=native` в Release-сборке.
+**Сравнение double через SIMD не сделано осознанно:** все фильтры в 43 запросах идут по целочисленным колонкам, ни один не сравнивает float. Поэтому SIMD-путь для double был бы кодом, который никогда не выполняется. Float участвует только в агрегатах (AVG), где сравнения нет.
+
+Требуется CPU с AVX2 (Intel с 2013, AMD с 2015); включается флагом `-march=native` в Release.
 
 ---
 
-## RE2 для regex
+## RE2 для регулярных выражений
 
-Q28 ClickBench использует `REGEXP_REPLACE(Referer, '^https?://(?:www\.)?([^/]+)/.*$', '\1')`. С `std::regex` (ECMAScript, NFA с backtracking) Q28 на полном hits занимает ~280 секунд.
+Q28 использует `REGEXP_REPLACE(Referer, '^https?://(?:www\.)?([^/]+)/.*$', '\1')` — вытаскивает домен из URL.
 
-Подключена Google [RE2](https://github.com/google/re2) — Thompson NFA без backtracking, O(n) на match. На том же запросе — **~190 секунд** (-32%).
+Стандартный `std::regex` (ECMAScript, NFA с backtracking) на 100M строк работает ~280 секунд — он печально известен медлительностью. Подключена Google [RE2](https://github.com/google/re2): Thompson NFA без backtracking, гарантированно O(n) на матч. Тот же запрос — **~190 секунд** (−32%).
 
-Линкуется как `libre2.so` (Ubuntu `libre2-dev`), без CMake config-файла:
-
-```cmake
-target_link_libraries(exec PUBLIC re2)
+```cpp
+RE2 re(pattern);            // компилируется один раз на батч
+RE2::Replace(&str, re, repl);
 ```
 
-Capture groups в pattern и replacement используются в нативном RE2-формате (`\1`, `\2`), без конвертации.
+Capture groups в формате RE2 (`\1`) используются напрямую, без конвертации. Линкуется как `libre2` (пакет `libre2-dev`).
 
 ---
 
-## Планы запросов (clickbench_run.cpp)
+## Как собираются 43 запроса
 
-Запросы не парсятся из SQL. Каждый из 43 запросов ClickBench захардкожен как функция `Plan QN(ColumnarReader&)`.
+В `bench/clickbench_run.cpp` каждый запрос — функция `Plan QN(ColumnarReader&)`, собирающая дерево операторов через мини-DSL.
 
-### DSL для построения планов
+### Структура Plan
+
+```cpp
+struct Plan {
+    std::vector<std::unique_ptr<Operator>> nodes;          // владеет всеми операторами
+    Operator* root = nullptr;                              // текущая вершина дерева
+    std::unordered_map<std::string, DataType> format_hints; // подсказки форматирования вывода
+};
+```
+
+`nodes` хранит владение операторами. `AddXxx(p, ...)` создаёт оператор, делает его ребёнком текущего `root` и обновляет `root`. Так дерево строится снизу вверх.
+
+### Пример: Q7
+
+`SELECT AdvEngineID, COUNT(*) FROM hits WHERE AdvEngineID <> 0 GROUP BY AdvEngineID ORDER BY COUNT(*) DESC`
 
 ```cpp
 Plan Q7(ColumnarReader& rdr) {
@@ -644,9 +777,9 @@ Plan Q7(ColumnarReader& rdr) {
     AddScan(p, rdr, {"AdvEngineID"});
     AddFilter(p, Ne(C(p, "AdvEngineID"), MakeConstI64(0)));
     AddHashAgg(p,
-        Cols(KV{"AdvEngineID", C(p, "AdvEngineID")}),
-        Aggs(CountStar("count")));
-    AddSort(p, SortKeys(SK{C(p, "count"), false}));
+        Cols(KV{"AdvEngineID", C(p, "AdvEngineID")}),  // ключ группировки
+        Aggs(CountStar("count")));                      // агрегат
+    AddSort(p, SortKeys(SK{C(p, "count"), false}));     // DESC по count
     AddProject(p, Cols(
         KV{"AdvEngineID", C(p, "AdvEngineID")},
         KV{"count", C(p, "count")}));
@@ -654,48 +787,28 @@ Plan Q7(ColumnarReader& rdr) {
 }
 ```
 
-- `AddScan/AddFilter/AddHashAgg/AddProject/AddSort/AddTopK` — добавляют оператор в план
-- `C(p, "name")` — создаёт ColumnExpr по имени из текущего root
-- `Ne/Eq/Ge/Le/Add/Sub/Mul` — создают выражения
-- `Aggs(CountStar("c"), Sum("s", expr))` — список агрегатов
-- `Cols(KV{"name", expr})` — список колонок для Project
+Хелперы DSL:
+- `C(p, "name")` — `ColumnExpr` по имени из текущего `root`
+- `Ne/Eq/Ge/Le`, `Add/Sub/Mul`, `AndN`, `InList`, `Like`, `Length`, ... — конструируют выражения
+- `Cols(...)`, `Aggs(...)`, `SortKeys(...)` — variadic-сборка списков
+- `CountStar/Sum/Min/Max/Avg/Distinct` — спецификации агрегатов
 
-### Структура Plan
+### Запуск
 
-```cpp
-struct Plan {
-    vector<unique_ptr<Operator>> nodes;  // владение операторами
-    Operator* root = nullptr;            // текущий верхний оператор
-    unordered_map<string, DataType> format_hints;  // для форматирования дат
-};
-```
-
-`nodes` хранит владение всеми операторами. Каждый `AddOp` пушит оператор и обновляет `root`. Операторы связаны ссылками через `child_`:
-
-```
-Scan ← Filter ← HashAggregate ← Sort ← Project
-                                          ↑ root
-```
-
-### Формат вывода
-
-- Числа: `std::to_string` для целых, `%.15g` для float
-- Строки: всегда в кавычках `"..."`
-- Date: `YYYY-MM-DD` (через `format_hints`)
-- DateTime: `YYYY-MM-DD HH:MM:SS` (через `format_hints`)
+`main` парсит аргументы (`--input`, `--output_dir`, опционально `--queries=N,M`), открывает `ColumnarReader`, и для каждого выбранного запроса строит план, гоняет `root->Next()` до конца, пишет результат в `q{NN}.csv`, замеряет время.
 
 ---
 
-## CSV-парсер (csv_to_columnar)
+## Запись результата
 
-Быстрый парсер для конвертации hits.csv → columnar:
+`WritePlanToCsv` вытягивает все батчи из корня плана и пишет CSV:
 
-- `FILE*` + `getline()` + 4 MB буфер вместо `istream::get()`
-- Каждая строка парсится независимо (без multi-line склейки)
-- Строки с неправильным числом полей или ошибками парсинга пропускаются с логом
-- Батчи по 65536 строк записываются через `ColumnarWriter`
+- **числа** — `std::to_string` для целых, `%.15g` для double
+- **строки** — всегда в кавычках `"..."`
+- **Date** — через `format_hints` форматируется как `YYYY-MM-DD`
+- **DateTime** — как `YYYY-MM-DD HH:MM:SS`
 
-На 99M строк hits.csv: ~20 минут конвертации.
+`format_hints` нужен потому что Date/DateTime в памяти — это `int64`, и без подсказки они вывелись бы числом. План явно помечает такие колонки (например Q6 помечает `min`/`max` как Date).
 
 ---
 
@@ -703,63 +816,80 @@ Scan ← Filter ← HashAggregate ← Sort ← Project
 
 ### Библиотеки
 
-| Цель | Тип | Описание |
-|------|-----|----------|
-| `utils` | INTERFACE | Утилиты (Trim, Seek, parse, hash_map) |
+| Цель | Тип | Содержимое |
+|---|---|---|
+| `utils` | INTERFACE | Trim, Seek, parse, hash_map, simd |
 | `csv` | STATIC | CSV reader/writer |
-| `schema` | INTERFACE | DataType, ColumnSchema, LoadSchemaCsv |
-| `batch` | STATIC | Batch (колоночное хранение в памяти) |
-| `columnar` | STATIC | ColumnarWriter + ColumnarReader (mmap) |
-| `exec` | STATIC | Execution engine (операторы, выражения, функции) |
+| `schema` | INTERFACE | DataType, схема |
+| `batch` | STATIC | Batch, DictColumn, CsvBatchReader |
+| `columnar` | STATIC | ColumnarWriter, ColumnarReader (mmap) |
+| `exec` | STATIC | операторы, выражения, функции (линкует `re2`) |
 
 ### Исполняемые файлы
 
-| Цель | Описание |
-|------|----------|
-| `csv_to_columnar` | Конвертер CSV → columnar |
-| `clickbench_run` | Исполнитель 43 запросов ClickBench |
-| `ColumnarDB` | Legacy CLI (to-csv, to-columnar) |
+| Цель | Назначение |
+|---|---|
+| `csv_to_columnar` | конвертер CSV → columnar |
+| `clickbench_run` | прогон 43 запросов |
+| `ColumnarDB` | вспомогательный CLI (to-columnar / to-csv) |
 
-### Флаги сборки
+### Флаги
 
-- **Release**: `-O3`, LTO (`CMAKE_INTERPROCEDURAL_OPTIMIZATION`), `-march=native`
+- **Release**: `-O3`, LTO (`CMAKE_INTERPROCEDURAL_OPTIMIZATION`), `-march=native` (включает AVX2)
 - **Debug**: `-fsanitize=address,undefined`, `-fno-omit-frame-pointer`
 
 ---
 
-## Результаты на ClickBench (99M строк, 105 колонок)
+## Тесты
 
-43/43 запросов выполняются. 0 FAIL.
+80 unit-тестов (GoogleTest), три файла:
 
-Тестовая платформа: 19 GiB RAM, 8 vCPU, NVMe SSD.
+- **test_types.cpp** — DataType, парсинг int/float/Date/DateTime, Trim, схема
+- **test_roundtrip.cpp** — запись Batch в columnar и чтение обратно даёт исходные данные (включая edge cases: кавычки в CSV, пустые строки, CRLF, большие строки, битые файлы)
+- **test_exec.cpp** — все операторы (Scan/Filter/Project/Sort/TopK/HashAggregate) и выражения (compare, arith, logical, in_list, if, функции), а также комбинации (Filter→Aggregate, GROUP BY, HAVING)
+
+```bash
+cd build/build/Release && ctest
+```
+
+---
+
+## Результаты на ClickBench
+
+Полный датасет: 99 997 497 строк, 105 колонок. Платформа: 19 GiB RAM, 8 vCPU, NVMe SSD.
+
+**43/43 запросов выполняются, 0 падений.**
 
 ### Типичные времена (cold run)
 
-| Запрос | Время | Описание |
-|--------|-------|----------|
+| Запрос | Время | Что делает |
+|---|---|---|
 | Q0 | 0.4s | COUNT(*) |
+| Q1 | 1.5s | COUNT WHERE AdvEngineID<>0 |
 | Q7 | 1.5s | GROUP BY + ORDER BY |
 | Q15 | 5.8s | GROUP BY UserID (17M групп) |
 | Q18 | 55s | GROUP BY UserID, minute, SearchPhrase |
 | Q28 | 189s | REGEXP_REPLACE + HAVING (RE2) |
-| Q32 | 48s | GROUP BY WatchID, ClientIP (~99M групп) |
-| Q33 | 77s | GROUP BY URL (топ 10 по count) |
+| Q32 | 48s | GROUP BY WatchID, ClientIP (~100M групп) |
+| Q33 | 77s | GROUP BY URL, топ-10 |
 
-Geomean по всем 43 запросам: **~9.5 секунд**.
+Geomean по 43 запросам: **≈9.5 секунды**.
 
-### Эволюция оптимизаций
+### Вклад оптимизаций (geomean)
 
 | Шаг | Geomean | Δ |
-|-----|---------|---|
-| Базовая версия (Plain encoding, std::unordered_map) | ~25s | baseline |
-| + Dict encoding (storage + runtime) | ~16s | -36% |
-| + FastKeyN<N> (typed group keys) | ~13s | -19% |
-| + mmap + readahead | ~12s | -8% |
-| + custom HashMap + SplitMix64 | ~11s | -8% |
-| + RLE encoding | ~10s | -9% |
-| + SIMD (AVX2 compare/arith) | ~9.7s | -3% |
-| + RE2 (replaces std::regex) | **~9.5s** | -2% |
+|---|---|---|
+| База (Plain encoding, std::unordered_map) | ≈25s | — |
+| + Dictionary encoding | ≈16s | −36% |
+| + FastKeyN<N> (типизированные ключи групп) | ≈13s | −19% |
+| + mmap + readahead | ≈12s | −8% |
+| + кастомный HashMap + SplitMix64 | ≈11s | −8% |
+| + RLE encoding | ≈10s | −9% |
+| + SIMD (AVX2) | ≈9.7s | −3% |
+| + RE2 | **≈9.5s** | −2% |
 
 ### Сравнение с DuckDB
 
-Наш однопоточный движок в среднем **~7-10× медленнее** DuckDB (многопоточный + SIMD + проприетарный compressed format). Для образовательного проекта это очень достойный результат — мы в top-3 среди реализаций задачи на курсе (~16 команд).
+Наш однопоточный движок в среднем **~7-10× медленнее** DuckDB (многопоточный, с SIMD и проприетарным сжатым форматом). Для учебного проекта без многопоточности это сильный результат — top-3 среди реализаций на курсе.
+
+Основной нереализованный резерв ускорения — **многопоточность** (параллельный scan + локальные хеш-таблицы по потокам с финальным merge), которая дала бы ещё ~4-8× на многоядерной машине.

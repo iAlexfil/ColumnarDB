@@ -199,17 +199,12 @@ namespace exec {
 	}
 
 	FuncRegistry::FuncRegistry() {
-		auto add = [&](ScalarFn fn) {
-			std::string key = LowerCopy(fn.name);
-			overloads_[key].push_back(std::move(fn));
-		};
-
-		add({"length", {EvalType::Str}, EvalType::I64, FnLength});
-		add({"like", {EvalType::Str, EvalType::Str}, EvalType::Bool, FnLike});
-		add({"extract", {EvalType::Str, EvalType::DateTime}, EvalType::I64, FnExtractDT});
-		add({"extract", {EvalType::Str, EvalType::Date}, EvalType::I64, FnExtractDT});
-		add({"date_trunc", {EvalType::Str, EvalType::DateTime}, EvalType::DateTime, FnDateTrunc});
-		add({"regexp_replace", {EvalType::Str, EvalType::Str, EvalType::Str}, EvalType::Str, FnRegexpReplace});
+		Add({"length", {EvalType::Str}, EvalType::I64, FnLength});
+		Add({"like", {EvalType::Str, EvalType::Str}, EvalType::Bool, FnLike});
+		Add({"extract", {EvalType::Str, EvalType::DateTime}, EvalType::I64, FnExtractDT});
+		Add({"extract", {EvalType::Str, EvalType::Date}, EvalType::I64, FnExtractDT});
+		Add({"date_trunc", {EvalType::Str, EvalType::DateTime}, EvalType::DateTime, FnDateTrunc});
+		Add({"regexp_replace", {EvalType::Str, EvalType::Str, EvalType::Str}, EvalType::Str, FnRegexpReplace});
 	}
 
 	FuncRegistry &FuncRegistry::Instance() {

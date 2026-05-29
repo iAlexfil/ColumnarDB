@@ -84,17 +84,17 @@ namespace columnar {
 			if (c >= meta.columns.size()) continue;
 			const auto &ch = meta.columns[c];
 			if (ch.size == 0) continue;
-			::readahead(fd_, static_cast<off64_t>(ch.offset), ch.size);
+			readahead(fd_, static_cast<off64_t>(ch.offset), ch.size);
 		}
 	}
 
 	ColumnarReader::~ColumnarReader() {
 		if (mapped_) {
-			::munmap(const_cast<std::uint8_t *>(mapped_), mapped_size_);
+			munmap(const_cast<std::uint8_t *>(mapped_), mapped_size_);
 			mapped_ = nullptr;
 		}
 		if (fd_ >= 0) {
-			::close(fd_);
+			close(fd_);
 			fd_ = -1;
 		}
 	}

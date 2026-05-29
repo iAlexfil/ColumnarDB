@@ -19,21 +19,19 @@ namespace exec {
 	namespace {
 		constexpr std::size_t kMaxFastKeys = 4;
 
-		template<std::size_t N>
-		struct FastKeyN {
-			std::array<std::int64_t, N> data{};
+		struct FastKey {
+			std::array<std::int64_t, kMaxFastKeys> data{};
 
-			bool operator==(const FastKeyN &o) const noexcept {
+			bool operator==(const FastKey &o) const noexcept {
 				return std::memcmp(data.data(), o.data.data(), sizeof(data)) == 0;
 			}
 		};
 
-		template<std::size_t N>
-		struct FastKeyNHash {
-			std::size_t operator()(const FastKeyN<N> &k) const noexcept {
+		struct FastKeyHash {
+			std::size_t operator()(const FastKey &k) const noexcept {
 				std::size_t h = 1469598103934665603ULL;
-				for (std::size_t i = 0; i < N; ++i) {
-					auto v = static_cast<std::uint64_t>(k.data[i]);
+				for (std::int64_t x: k.data) {
+					auto v = static_cast<std::uint64_t>(x);
 					v ^= v >> 33;
 					v *= 0xff51afd7ed558ccdULL;
 					v ^= v >> 33;
@@ -306,21 +304,17 @@ namespace exec {
 	                             std::vector<GroupAggSpec> aggs)
 		: child_(child) {
 		if (keys.empty()) throw std::runtime_error("HashAggregate: at least one key required");
-		for (auto &[n, e]: keys) {
-			key_types_.push_back(e->result_type());
-			key_names_.push_back(n);
-			key_exprs_.push_back(std::move(e));
+
+		out_schema_.reserve(keys.size() + aggs.size());
+		for (auto &[name, expr]: keys) {
+			key_types_.push_back(expr->result_type());
+			out_schema_.push_back(ColumnSchema{name, EvalTypeToDataType(expr->result_type())});
+			key_exprs_.push_back(std::move(expr));
 		}
-		for (auto &s: aggs) {
-			agg_names_.push_back(s.name);
-			aggs_.push_back(BuildGroupAgg(s));
-		}
-		out_schema_.reserve(key_names_.size() + agg_names_.size());
-		for (std::size_t i = 0; i < key_names_.size(); ++i) {
-			out_schema_.push_back(ColumnSchema{key_names_[i], EvalTypeToDataType(key_types_[i])});
-		}
-		for (std::size_t i = 0; i < agg_names_.size(); ++i) {
-			out_schema_.push_back(ColumnSchema{agg_names_[i], aggs_[i]->OutputType()});
+		for (auto &spec: aggs) {
+			auto agg = BuildGroupAgg(spec);
+			out_schema_.push_back(ColumnSchema{spec.name, agg->OutputType()});
+			aggs_.push_back(std::move(agg));
 		}
 
 		use_fast_ = key_types_.size() <= kMaxFastKeys;
@@ -404,35 +398,44 @@ namespace exec {
 		return std::nullopt;
 	}
 
-	template<std::size_t N>
-	void HashAggregate::ConsumeFastImpl() {
-		HashMap<FastKeyN<N>, FastKeyNHash<N>> map;
+	void HashAggregate::ConsumeFast() {
+		const std::size_t nkeys = key_types_.size();
+		HashMap<FastKey, FastKeyHash> map;
 		std::vector<std::uint32_t> gids;
 		std::uint32_t num_groups = 0;
 
 		while (auto eb = child_.Next()) {
 			EvalContext ctx{eb->batch, eb->full_selection() ? nullptr : &eb->sel};
 
-			std::vector<EvalCol> key_cols;
-			key_cols.reserve(N);
-			for (const auto &e: key_exprs_) key_cols.push_back(e->eval(ctx));
-
 			const std::size_t n = ctx.rows();
+
+			std::vector<std::vector<std::int64_t>> key_data(nkeys);
+			for (std::size_t i = 0; i < nkeys; ++i) {
+				EvalCol col = key_exprs_[i]->eval(ctx);
+				key_data[i].resize(n);
+				if (key_types_[i] == EvalType::Str) {
+					const auto &v = std::get<std::vector<std::string>>(col);
+					for (std::size_t r = 0; r < n; ++r) {
+						key_data[i][r] = static_cast<std::int64_t>(InternString(v[r]));
+					}
+				} else {
+					std::visit([&](const auto &v) {
+						using T = typename std::decay_t<decltype(v)>::value_type;
+						if constexpr (std::is_arithmetic_v<T>) {
+							for (std::size_t r = 0; r < n; ++r) {
+								key_data[i][r] = static_cast<std::int64_t>(v[r]);
+							}
+						} else {
+							throw std::runtime_error("ConsumeFast: unexpected non-numeric");
+						}
+					}, col);
+				}
+			}
+
 			gids.assign(n, 0);
 			for (std::size_t r = 0; r < n; ++r) {
-				FastKeyN<N> k;
-				for (std::size_t i = 0; i < N; ++i) {
-					if (key_types_[i] == EvalType::Str) {
-						const auto &v = std::get<std::vector<std::string>>(key_cols[i]);
-						k.data[i] = static_cast<std::int64_t>(InternString(v[r]));
-					} else {
-						k.data[i] = std::visit([r](const auto &v) -> std::int64_t {
-							using T = typename std::decay_t<decltype(v)>::value_type;
-							if constexpr (std::is_arithmetic_v<T>) return static_cast<std::int64_t>(v[r]);
-							else throw std::runtime_error("ConsumeFastImpl: unexpected non-numeric");
-						}, key_cols[i]);
-					}
-				}
+				FastKey k;
+				for (std::size_t i = 0; i < nkeys; ++i) k.data[i] = key_data[i][r];
 
 				auto *ptr = map.find(k);
 				std::uint32_t gid;
@@ -452,12 +455,12 @@ namespace exec {
 		result_ = std::make_unique<Batch>(out_schema_);
 		result_->Reserve(num_groups);
 
-		std::vector<const FastKeyN<N> *> sorted_keys(num_groups);
-		map.for_each([&](const FastKeyN<N> &k, std::uint32_t gid) { sorted_keys[gid] = &k; });
+		std::vector<const FastKey *> sorted_keys(num_groups);
+		map.for_each([&](const FastKey &k, std::uint32_t gid) { sorted_keys[gid] = &k; });
 
 		for (std::uint32_t gid = 0; gid < num_groups; ++gid) {
-			const FastKeyN<N> &fk = *sorted_keys[gid];
-			for (std::size_t i = 0; i < N; ++i) {
+			const FastKey &fk = *sorted_keys[gid];
+			for (std::size_t i = 0; i < nkeys; ++i) {
 				if (key_types_[i] == EvalType::Str) {
 					std::get<DictColumn>(result_->GetColumn(i))
 						.push_back(GetInternedString(static_cast<std::uint32_t>(fk.data[i])));
@@ -465,24 +468,14 @@ namespace exec {
 					std::visit([v = fk.data[i]](auto &vec) {
 						using T = typename std::decay_t<decltype(vec)>::value_type;
 						if constexpr (std::is_integral_v<T>) vec.push_back(static_cast<T>(v));
-						else throw std::runtime_error("ConsumeFastImpl emit: unexpected non-integer slot");
+						else throw std::runtime_error("ConsumeFast emit: unexpected non-integer slot");
 					}, result_->GetColumn(i));
 				}
 			}
 		}
 		for (std::size_t i = 0; i < aggs_.size(); ++i) {
-			aggs_[i]->EmitInto(result_->GetColumn(N + i));
+			aggs_[i]->EmitInto(result_->GetColumn(nkeys + i));
 		}
 		result_->SetRowCount(num_groups);
-	}
-
-	void HashAggregate::ConsumeFast() {
-		switch (key_types_.size()) {
-			case 1: ConsumeFastImpl<1>(); break;
-			case 2: ConsumeFastImpl<2>(); break;
-			case 3: ConsumeFastImpl<3>(); break;
-			case 4: ConsumeFastImpl<4>(); break;
-			default: throw std::runtime_error("ConsumeFast: unexpected key count");
-		}
 	}
 }

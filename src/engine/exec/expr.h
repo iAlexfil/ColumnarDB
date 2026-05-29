@@ -22,8 +22,6 @@ namespace exec {
 		std::vector<std::uint8_t>
 	>;
 
-	std::size_t EvalColSize(const EvalCol &c);
-
 	DataType EvalTypeToDataType(EvalType t);
 
 	EvalType DataTypeToEvalType(DataType t);
@@ -58,15 +56,9 @@ namespace exec {
 
 	ExprPtr MakeConstI64(std::int64_t v);
 
-	ExprPtr MakeConstU64(std::uint64_t v);
-
-	ExprPtr MakeConstF64(double v);
-
 	ExprPtr MakeConstStr(std::string v);
 
 	ExprPtr MakeConstDate(std::int64_t days);
-
-	ExprPtr MakeConstDateTime(std::int64_t seconds);
 
 	ExprPtr MakeCompare(ExprPtr l, CmpOp op, ExprPtr r);
 
@@ -77,8 +69,6 @@ namespace exec {
 	ExprPtr MakeInList(ExprPtr lhs, std::vector<ExprPtr> consts);
 
 	ExprPtr MakeIf(ExprPtr cond, ExprPtr if_true, ExprPtr if_false);
-
-	std::size_t ColumnIndexByName(const Schema &s, std::string_view name);
 
 	bool IsIntegerLike(EvalType t);
 }

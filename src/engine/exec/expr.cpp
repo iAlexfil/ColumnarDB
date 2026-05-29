@@ -8,10 +8,6 @@
 #include "exprs/if.h"
 
 namespace exec {
-	std::size_t EvalColSize(const EvalCol &c) {
-		return std::visit([](const auto &v) { return v.size(); }, c);
-	}
-
 	DataType EvalTypeToDataType(EvalType t) {
 		switch (t) {
 			case EvalType::I64: return DataType::Int64;
@@ -48,11 +44,13 @@ namespace exec {
 		return t == EvalType::I64 || t == EvalType::Date || t == EvalType::DateTime;
 	}
 
-	std::size_t ColumnIndexByName(const Schema &s, std::string_view name) {
-		for (std::size_t i = 0; i < s.size(); ++i) {
-			if (s[i].name == name) return i;
+	namespace {
+		std::size_t ColumnIndexByName(const Schema &s, std::string_view name) {
+			for (std::size_t i = 0; i < s.size(); ++i) {
+				if (s[i].name == name) return i;
+			}
+			throw std::runtime_error("column not found: " + std::string(name));
 		}
-		throw std::runtime_error("column not found: " + std::string(name));
 	}
 
 	ExprPtr MakeColumn(const Schema &s, std::size_t idx) {
@@ -68,24 +66,12 @@ namespace exec {
 		return std::make_unique<ConstExpr<std::int64_t> >(v, EvalType::I64);
 	}
 
-	ExprPtr MakeConstU64(std::uint64_t v) {
-		return std::make_unique<ConstExpr<std::uint64_t> >(v, EvalType::U64);
-	}
-
-	ExprPtr MakeConstF64(double v) {
-		return std::make_unique<ConstExpr<double> >(v, EvalType::F64);
-	}
-
 	ExprPtr MakeConstStr(std::string v) {
 		return std::make_unique<ConstExpr<std::string> >(std::move(v), EvalType::Str);
 	}
 
 	ExprPtr MakeConstDate(std::int64_t days) {
 		return std::make_unique<ConstExpr<std::int64_t> >(days, EvalType::Date);
-	}
-
-	ExprPtr MakeConstDateTime(std::int64_t seconds) {
-		return std::make_unique<ConstExpr<std::int64_t> >(seconds, EvalType::DateTime);
 	}
 
 	ExprPtr MakeCompare(ExprPtr l, CmpOp op, ExprPtr r) {

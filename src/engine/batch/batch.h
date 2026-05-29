@@ -29,7 +29,6 @@ public:
 	std::size_t ColCount() const { return columns_.size(); }
 
 	const Schema &GetSchema() const { return schema_; }
-	const std::vector<Column> &Columns() const { return columns_; }
 
 	const Column &GetColumn(std::size_t i) const { return columns_[i]; }
 	Column &GetColumn(std::size_t i) { return columns_[i]; }
@@ -51,9 +50,6 @@ public:
 	               char delimiter = ',');
 
 	std::optional<Batch> ReadNext();
-
-	std::size_t CurrentLine() const { return line_no_; }
-	std::size_t BatchRows() const { return batch_rows_; }
 
 private:
 	CSVReader reader_;
